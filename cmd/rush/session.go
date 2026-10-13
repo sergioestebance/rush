@@ -73,6 +73,10 @@ func sessionCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		sub = ""
 	}
 	switch sub {
+	case "api":
+		asJSON, err = sessionAPI(rest, stdin, stdout, false)
+	case "events":
+		asJSON, err = sessionAPI(rest, stdin, stdout, true)
 	case "":
 	case "start":
 		asJSON, err = sessionStart(rest, stdout)

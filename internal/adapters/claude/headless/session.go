@@ -1,6 +1,7 @@
 package headless
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json/jsontext"
 	"errors"
@@ -29,6 +30,7 @@ type Options struct {
 	// instead names a new one; leave both empty to let Claude Code pick.
 	Resume         string
 	SessionID      string
+	ForkFrom       string
 	Model          string
 	Effort         string // low, medium, high, xhigh, max; fixed for the process's life
 	PermissionMode string // default, acceptEdits, plan, auto, ...
@@ -53,7 +55,9 @@ func (o Options) args() []string {
 		// without it headless sessions deny them silently.
 		"--permission-prompt-tool", "stdio",
 	}
-	if o.Resume != "" {
+	if o.ForkFrom != "" {
+		args = append(args, "--resume", o.ForkFrom, "--session-id", o.SessionID, "--fork-session")
+	} else if o.Resume != "" {
 		args = append(args, "--resume", o.Resume)
 	} else if o.SessionID != "" {
 		args = append(args, "--session-id", o.SessionID)
@@ -81,7 +85,7 @@ type Session struct {
 	// holding a lock never blocks on Claude Code (which may itself be
 	// blocked writing its output).
 	wmu     sync.Mutex
-	wbuf    [][]byte
+	wbuf    []pendingWrite
 	wsig    chan struct{}
 	wclosed bool
 	werr    error
@@ -90,6 +94,11 @@ type Session struct {
 	err     error
 	stderr  tail
 	guard   *pgguard.Guard
+}
+
+type pendingWrite struct {
+	data    []byte
+	written chan error
 }
 
 // RunsSession says whether args are a headless Claude Code on sessionID, as
@@ -151,12 +160,18 @@ func (s *Session) writer() {
 		batch, closed := s.wbuf, s.wclosed
 		s.wbuf = nil
 		s.wmu.Unlock()
+		var failed error
 		for _, b := range batch {
-			if _, err := s.stdin.Write(b); err != nil {
+			if failed == nil {
+				_, failed = s.stdin.Write(b.data)
+			}
+			if b.written != nil {
+				b.written <- failed
+			}
+			if failed != nil {
 				s.wmu.Lock()
-				s.werr = err
+				s.werr = failed
 				s.wmu.Unlock()
-				break
 			}
 		}
 		if closed {
@@ -233,6 +248,10 @@ func (s *Session) Err() error {
 }
 
 func (s *Session) write(v any) error {
+	return s.enqueue(v, nil)
+}
+
+func (s *Session) enqueue(v any, written chan error) error {
 	b, err := jsonx.Marshal(v)
 	if err != nil {
 		return err
@@ -246,8 +265,25 @@ func (s *Session) write(v any) error {
 	case s.werr != nil:
 		return s.werr
 	}
-	s.wbuf = append(s.wbuf, append(b, '\n'))
+	s.wbuf = append(s.wbuf, pendingWrite{data: append(b, '\n'), written: written})
 	return nil
+}
+
+// WriteConfirmed waits for the actual pipe write. Queue acceptance is not a
+// delivery receipt. Cancellation may race a write, so callers retain uncertainty.
+func (s *Session) WriteConfirmed(ctx context.Context, v any) error {
+	written := make(chan error, 1)
+	if err := s.enqueue(v, written); err != nil {
+		return err
+	}
+	select {
+	case err := <-written:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.done:
+		return errors.New("session stopped before write confirmation")
+	}
 }
 
 // Send queues a user message. Sent mid-turn, Claude Code picks it up at its

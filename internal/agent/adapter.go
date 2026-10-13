@@ -69,6 +69,17 @@ type Driver interface {
 	Start(ctx context.Context, o StartOptions) (Conn, error)
 }
 
+// SessionAPIProvider exposes an adapter through the bounded public host API.
+// The adapter owns its profile and provider-specific settings translation.
+// An adapter without this interface is not advertised or started by that API.
+type SessionAPIProvider interface {
+	SessionAPIFeatures() []string
+	SessionAPIProfile() Profile
+	SessionAPIModel(model string) string
+	SessionAPIMode(mode string) string
+	SessionAPIEngineMode(mode string) string
+}
+
 // Orphans is a Driver that knows its own sessions' processes by their
 // command line. A host that starts a session ends any process still running
 // it for a host that's gone, so two never write one transcript.
@@ -87,6 +98,7 @@ type StartOptions struct {
 	SessionID string // resumed when Resume is set, else the new session's id if the agent takes one
 	Resume    bool
 	Fork      bool
+	ForkFrom  string // source history copied into the explicit new SessionID
 	Model     string
 	Effort    string
 	Mode      string

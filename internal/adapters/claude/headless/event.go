@@ -18,6 +18,7 @@ type Event interface{ event() }
 
 // Init arrives once, when the session is ready.
 type Init struct {
+	Effort         string
 	SessionID      string
 	Model          string
 	Cwd            string
@@ -341,6 +342,7 @@ func decodeSystem(subtype string, line []byte, other Other) (Event, error) {
 	switch subtype {
 	case "init":
 		var r struct {
+			Effort         string      `json:"effort"`
 			SessionID      string      `json:"session_id"`
 			Model          string      `json:"model"`
 			Cwd            string      `json:"cwd"`

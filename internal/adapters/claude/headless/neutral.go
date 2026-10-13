@@ -29,7 +29,7 @@ func (n *Neutral) Event(ev Event) []event.Event {
 	}
 	switch e := ev.(type) {
 	case Init:
-		out := event.Init{SessionID: e.SessionID, Model: e.Model, Cwd: e.Cwd, Mode: e.PermissionMode, Version: e.Version, Tools: e.Tools, Commands: e.SlashCommands}
+		out := event.Init{SessionID: e.SessionID, Model: e.Model, Cwd: e.Cwd, Mode: e.PermissionMode, Effort: e.Effort, Version: e.Version, Tools: e.Tools, Commands: e.SlashCommands}
 		for _, s := range e.MCPServers {
 			out.MCP = append(out.MCP, event.MCPServer(s))
 		}
