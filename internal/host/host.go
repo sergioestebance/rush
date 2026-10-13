@@ -43,6 +43,8 @@ import (
 // Config is how a session is started. It is written next to the socket so
 // the host process reads it on launch.
 type Config struct {
+	PublicAPI bool   `json:"publicAPI,omitempty"`
+	ForkFrom  string `json:"forkFrom,omitempty"`
 	ID        string `json:"id"`
 	SessionID string `json:"sessionId"`
 	Resume    bool   `json:"resume"` // the conversation already exists
@@ -351,6 +353,7 @@ const (
 )
 
 type server struct {
+	api *apiControl
 	cfg Config
 	ln  net.Listener
 
@@ -462,6 +465,14 @@ func Run(id string) error {
 		info: Info{ID: cfg.ID, Kind: cfg.Kind, SessionID: cfg.SessionID, Account: cfg.Account.Name, Cwd: cfg.Cwd, Name: cfg.Name,
 			HostPID: os.Getpid(), State: "idle", Proto: Proto, Model: cfg.Model, Effort: cfg.Effort, Without: cfg.Without, PermissionMode: cfg.PermissionMode,
 			StartedAt: now, UpdatedAt: now, StartedBy: cfg.StartedBy, Meta: cfg.Meta, Profile: cfg.Profile, Homes: true, Inbox: takesInbox(cfg.Kind), Exe: ExeStamp()},
+	}
+	if cfg.PublicAPI {
+		s.api = newAPIControl(s)
+		if err := s.listenAPI(); err != nil {
+			return err
+		}
+		defer s.api.listener.Close()
+		defer os.Remove(apiSocket(cfg.ID))
 	}
 	if old, err := readInfoFile(id); err == nil {
 		s.info.Left = old.Left
@@ -585,6 +596,9 @@ func TurnCost(spent *float64, total float64) float64 {
 // detach forgets the running session so nothing more is sent to it, and
 // returns it for stopping outside the lock. Called with mu held.
 func (s *server) detach() agent.Conn {
+	if s.api != nil {
+		s.api.agentGone()
+	}
 	c := s.conn
 	s.conn = nil
 	s.info.ClaudePID = 0
@@ -1002,6 +1016,9 @@ func (s *server) answered(id string) {
 		return
 	}
 	delete(s.pending, id)
+	if s.api != nil {
+		s.api.resolve(id)
+	}
 	b, _ := jsonx.Marshal(map[string]string{"type": typeAnswered, "request_id": id})
 	s.record(b)
 	if len(s.pending) == 0 && s.info.State == "blocked" {
@@ -1172,6 +1189,9 @@ const quietCheck = 2 * time.Second
 // publish writes info.json and sends the new info to clients. Called with
 // mu held.
 func (s *server) publish() {
+	if s.api != nil {
+		s.api.changed()
+	}
 	s.info.UpdatedAt = time.Now()
 	switch {
 	case s.info.State != "idle":
@@ -1686,6 +1706,10 @@ type op struct {
 }
 
 func (s *server) do(o op) error {
+	if s.api != nil {
+		s.api.mutation.Lock()
+		defer s.api.mutation.Unlock()
+	}
 	if o.Op == "send" {
 		var err error
 		if o.Guide {
@@ -1800,12 +1824,14 @@ func (s *server) do(o op) error {
 			s.mu.Unlock()
 			return fmt.Errorf("no pending request %s", o.ID)
 		}
-		s.answered(o.ID)
-		s.publish()
 		s.mu.Unlock()
 		err := s.answerAgent(conn, o.ID, req, &o)
 		s.mu.Lock()
-		s.afterAnswer()
+		if err == nil && s.conn == conn {
+			s.answered(o.ID)
+			s.afterAnswer()
+		}
+		s.publish()
 		s.mu.Unlock()
 		return err
 	case "mode":

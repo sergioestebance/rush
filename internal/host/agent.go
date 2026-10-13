@@ -60,7 +60,8 @@ func (s *server) start() error {
 	o := agent.StartOptions{
 		Profile: agent.Profile{Kind: a.Kind(), Name: s.cfg.Account.Name, Dir: s.cfg.Account.Dir},
 		Dir:     s.cfg.Cwd, SessionID: s.cfg.SessionID, Resume: s.began && s.cfg.SessionID != "", Fork: s.began && s.cfg.Fork,
-		Model: s.cfg.Model, Effort: s.cfg.Effort, Mode: s.cfg.PermissionMode,
+		ForkFrom: s.cfg.ForkFrom,
+		Model:    s.cfg.Model, Effort: s.cfg.Effort, Mode: s.cfg.PermissionMode,
 		Env: append(append([]string{"TMPDIR=" + tmp}, s.shimEnv()...), s.cfg.Env...), Flags: s.cfg.Flags, Binary: s.cfg.Binary, Without: s.cfg.Without,
 		TempDir: tmp, Lean: s.cfg.Lean, Subagents: agent.SubagentCap(), Tap: s.tap, Lightly: true,
 		// rush's own tools never ask: they draw, or start what the Agent tool would.
@@ -144,6 +145,9 @@ func (s *server) start() error {
 		}
 	})
 	s.conn, s.options = conn, map[string][]event.Option{}
+	if s.api != nil {
+		s.api.agentStarted()
+	}
 	s.moveNow = false
 	if m, ok := conn.(agent.Homed); ok {
 		s.info.Home, s.info.HomeAt = m.Home(), time.Now()
@@ -267,6 +271,9 @@ func (s *server) watchAgent(conn agent.Conn) {
 		return
 	}
 	s.conn, s.info.ClaudePID, s.info.Background = nil, 0, nil // they went with it
+	if s.api != nil {
+		s.api.agentGone()
+	}
 	s.info.Tasks, s.taskStart = 0, nil
 	s.info.Relogin = false // the next one starts on the account signed in now
 	s.pending = map[string]asked{}
@@ -290,6 +297,9 @@ func (s *server) watchAgent(conn agent.Conn) {
 
 // onAgentEvent takes one event from the session. Called with mu held.
 func (s *server) onAgentEvent(conn agent.Conn, ev event.Event) {
+	if s.api != nil {
+		s.api.onEvent(ev)
+	}
 	if !taps(conn) {
 		if b, err := eventLine(ev); err == nil {
 			s.record(b)
@@ -297,6 +307,11 @@ func (s *server) onAgentEvent(conn agent.Conn, ev event.Event) {
 	}
 	switch e := ev.(type) {
 	case event.Init:
+		if s.api != nil && e.SessionID != "" && e.SessionID != s.cfg.SessionID {
+			s.info.Error = "provider conversation identity is conflicting"
+			s.publish()
+			return
+		}
 		if e.Model != "" {
 			s.info.Model = e.Model
 		}
@@ -322,7 +337,9 @@ func (s *server) onAgentEvent(conn agent.Conn, ev event.Event) {
 			s.cfg.Carry = nil // it's the agent's own history now
 			s.saveConfig()
 		}
-		s.began = true
+		if s.api == nil || s.api.hasHistory {
+			s.began = true
+		}
 	case event.Message:
 		if e.Role == "assistant" {
 			s.waiting = time.Time{}

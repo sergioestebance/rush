@@ -36,7 +36,7 @@ func (a Adapter) Start(ctx context.Context, o agent.StartOptions) (agent.Conn, e
 	}
 	c := &conn{events: make(chan event.Event, 64), asks: map[string]headless.PermissionRequest{},
 		waits: map[string]chan headless.ControlReply{}, acct: acct, root: root, tools: slices.Clone(o.Tools),
-		done: make(chan struct{}), taps: o.Tap != nil}
+		done: make(chan struct{}), initDone: make(chan struct{}), taps: o.Tap != nil}
 	ho := headless.Options{Account: acct, Dir: o.Dir, Model: o.Model, Effort: o.Effort,
 		PermissionMode: o.Mode, Binary: o.Binary}
 	if allowed := c.trusted(); len(allowed) > 0 {
@@ -78,12 +78,15 @@ func (a Adapter) Start(ctx context.Context, o agent.StartOptions) (agent.Conn, e
 		o.Resume = true
 		c.carried = o.SessionID
 	}
-	if o.Resume {
+	if o.ForkFrom != "" {
+		ho.ForkFrom = o.ForkFrom
+		ho.SessionID = o.SessionID
+	} else if o.Resume {
 		ho.Resume = o.SessionID
 	} else {
 		ho.SessionID = o.SessionID
 	}
-	if o.Fork {
+	if o.Fork && o.ForkFrom == "" {
 		ho.Flags = append(ho.Flags, "--fork-session")
 	}
 	// Its scratch goes in the session's own folder, so what it leaves
@@ -154,12 +157,15 @@ func relayOnly(l []byte) bool {
 
 // conn is a running claude -p as an agent.Conn.
 type conn struct {
-	s       *headless.Session
-	events  chan event.Event
-	tools   []agent.ToolServer
-	initID  string
-	carried string // imported history acknowledged by initialize
-	acct    claude.Account
+	s         *headless.Session
+	events    chan event.Event
+	tools     []agent.ToolServer
+	initID    string
+	initDone  chan struct{}
+	initError string
+	initOnce  sync.Once
+	carried   string // imported history acknowledged by initialize
+	acct      claude.Account
 	// root is whether it was started for ~/.claude and runs in the
 	// home of the login in use then.
 	root bool
@@ -292,6 +298,9 @@ func (c *conn) own(ev headless.Event) bool {
 			}
 			c.events <- cmds
 		}
+		if e.ID == c.initID && c.initDone != nil {
+			c.initOnce.Do(func() { c.initError = e.Error; close(c.initDone) })
+		}
 		return true
 	case headless.RateLimit:
 		c.shareUsage(e)
@@ -412,6 +421,123 @@ func (c *conn) Send(in agent.Input) error {
 		imgs = append(imgs, headless.Image{MediaType: mt, Data: b})
 	}
 	return c.s.SendWith(in.Text, imgs)
+}
+
+// SendConfirmed is for receipt-bearing host operations. Legacy Send keeps its
+// nonblocking behavior, while this method confirms the write to provider stdin.
+func (c *conn) SendConfirmed(ctx context.Context, in agent.Input) error {
+	if len(in.Images) > 0 {
+		return errors.New("confirmed image delivery is unsupported")
+	}
+	return c.s.WriteConfirmed(ctx, map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": in.Text}})
+}
+
+// InitializeExecution reads effective state from the live provider before any
+// prompt. Session-only flag settings avoid writing the user's saved preferences.
+func (c *conn) InitializeExecution(ctx context.Context, model, effort, mode string) (event.Init, error) {
+	done := c.initDone
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return event.Init{}, ctx.Err()
+		case <-c.done:
+			return event.Init{}, errors.New("provider stopped during initialization")
+		}
+	}
+	if c.initError != "" {
+		return event.Init{}, errors.New("provider initialization was rejected")
+	}
+	ask := func(request jsontext.Value) (jsontext.Value, error) {
+		call, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		return c.Ask(call, request)
+	}
+	request, _ := jsonx.Marshal(map[string]any{"subtype": "apply_flag_settings", "settings": map[string]any{"effortLevel": effort}})
+	if _, err := ask(request); err != nil {
+		return event.Init{}, errors.New("provider effort selection was rejected")
+	}
+	request, _ = jsonx.Marshal(map[string]any{"subtype": "set_permission_mode", "mode": mode})
+	body, err := ask(request)
+	if err != nil {
+		return event.Init{}, errors.New("provider permission mode was rejected")
+	}
+	var selectedMode struct {
+		Mode string `json:"mode"`
+	}
+	if jsonx.Unmarshal(body, &selectedMode) != nil || selectedMode.Mode != mode {
+		return event.Init{}, errors.New("provider mode acknowledgement is missing")
+	}
+	body, err = ask(jsontext.Value(`{"subtype":"get_settings"}`))
+	if err != nil {
+		return event.Init{}, errors.New("effective provider settings are unavailable")
+	}
+	var settings struct {
+		Applied struct {
+			Model  string  `json:"model"`
+			Effort *string `json:"effort"`
+		} `json:"applied"`
+	}
+	if jsonx.Unmarshal(body, &settings) != nil || settings.Applied.Model == "" || settings.Applied.Effort == nil {
+		return event.Init{}, errors.New("effective provider settings are incomplete")
+	}
+	body, err = ask(jsontext.Value(`{"subtype":"get_status"}`))
+	if err != nil {
+		return event.Init{}, errors.New("provider conversation identity is unavailable")
+	}
+	var status struct {
+		Sections []struct {
+			Rows []struct {
+				Label string `json:"label"`
+				Value string `json:"value"`
+			} `json:"rows"`
+		} `json:"sections"`
+	}
+	if jsonx.Unmarshal(body, &status) != nil {
+		return event.Init{}, errors.New("provider status is invalid")
+	}
+	var sessionID, cwd string
+	for _, section := range status.Sections {
+		for _, row := range section.Rows {
+			switch row.Label {
+			case "Session ID":
+				if sessionID != "" && sessionID != row.Value {
+					return event.Init{}, errors.New("provider identity is conflicting")
+				}
+				sessionID = row.Value
+			case "cwd":
+				cwd = row.Value
+			}
+		}
+	}
+	if sessionID == "" || cwd == "" {
+		return event.Init{}, errors.New("provider identity is incomplete")
+	}
+	return event.Init{SessionID: sessionID, Cwd: cwd, Model: settings.Applied.Model, Effort: *settings.Applied.Effort, Mode: selectedMode.Mode}, nil
+}
+
+// AnswerConfirmed settles the named native request through the actual writer.
+func (c *conn) AnswerConfirmed(ctx context.Context, id string, allow bool, input jsontext.Value) error {
+	r, ok := c.take(id)
+	if !ok {
+		return errNotAsked
+	}
+	body := map[string]any{"behavior": "deny", "message": "Denied from the application.", "toolUseID": r.ToolUseID, "decisionClassification": "user_reject"}
+	if allow {
+		if len(input) == 0 {
+			input = r.Input
+		} else if r.Tool == "AskUserQuestion" {
+			input = over(r.Input, input)
+		}
+		body = map[string]any{"behavior": "allow", "updatedInput": input, "toolUseID": r.ToolUseID, "decisionClassification": "user_temporary"}
+	}
+	return c.s.WriteConfirmed(ctx, map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": r.ID, "response": body}})
+}
+
+// InterruptConfirmed waits for the provider's control acknowledgement.
+func (c *conn) InterruptConfirmed(ctx context.Context) error {
+	_, err := c.Ask(ctx, jsontext.Value(`{"subtype":"interrupt","reason":"interrupt"}`))
+	return err
 }
 
 // take is the request id asked, once: answering it forgets it.

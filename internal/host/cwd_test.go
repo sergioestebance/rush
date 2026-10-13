@@ -16,6 +16,18 @@ import (
 func TestFollowCwd(t *testing.T) {
 	t.Setenv("RUSH_HOME", t.TempDir())
 	cfgDir, start, wt := t.TempDir(), t.TempDir(), t.TempDir()
+	wasTemp := systemTemp
+	lastLookup := make(chan struct{}, 1)
+	systemTemp = func(p string) bool {
+		if p == start {
+			select {
+			case lastLookup <- struct{}{}:
+			default:
+			}
+		}
+		return false // test project folders live in system temp
+	}
+	t.Cleanup(func() { systemTemp = wasTemp })
 	s := &server{cfg: Config{ID: "cwd", Kind: string(claudead.Kind), Cwd: start, Account: agent.Profile{Dir: cfgDir}}, clients: map[*conn]struct{}{}}
 	s.info = Info{SessionID: "s1", Cwd: start, ClaudePID: 4242}
 	s.startCwd = start
@@ -71,5 +83,10 @@ func TestFollowCwd(t *testing.T) {
 	write("s1", start)
 	if got := follow(wt); got != wt {
 		t.Fatalf("the shell's reset pulled it back to %q", got)
+	}
+	select {
+	case <-lastLookup: // finish the final asynchronous temp check before restoring the fixture
+	case <-time.After(5 * time.Second):
+		t.Fatal("the final cwd check did not run")
 	}
 }
