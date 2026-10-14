@@ -42,6 +42,14 @@ func apiReadLedger(id, operation string) (apiLedgerEntry, error) {
 	return entry, nil
 }
 
+// apiReplaysInitialize reports whether params repeat the initialization this
+// host recorded under operation. A replay keeps the folder the host followed
+// its agent to: the caller only knew the folder it first asked for.
+func apiReplaysInitialize(id, operation string, params []byte) bool {
+	entry, err := apiReadLedger(id, operation)
+	return err == nil && entry.Receipt.Kind == "initialize" && entry.Fingerprint == apiFingerprint(params)
+}
+
 func (a *apiControl) read(operation string) (RuntimeReceipt, error) {
 	entry, err := apiReadLedger(a.s.cfg.ID, operation)
 	return entry.Receipt, err

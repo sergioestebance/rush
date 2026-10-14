@@ -301,6 +301,7 @@ func apiInitialize(ctx context.Context, r APIRequest) APIResponse {
 		}
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	cwd := request.Cwd
 	if cfg, e := ReadConfig(id); e == nil {
 		if cfg.SessionID != request.ConversationID || !apiMetadataMatches(cfg.Meta, request.Metadata) || !cfg.PublicAPI {
 			return apiFailure(r, "conflict", "not_applied")
@@ -308,12 +309,15 @@ func apiInitialize(ctx context.Context, r APIRequest) APIResponse {
 		if info, e := ReadInfo(id); e == nil && Alive(info.HostPID) {
 			return apiCall(ctx, id, r)
 		}
+		if apiReplaysInitialize(id, request.OperationID, r.Params) {
+			cwd = cfg.Cwd
+		}
 	}
 	provider, ok := agent.As[agent.SessionAPIProvider](agent.Kind(request.Provider))
 	if !ok {
 		return apiFailure(r, "unsupported", "not_applied")
 	}
-	cfg := Config{ID: id, SessionID: request.ConversationID, Cwd: request.Cwd, Kind: request.Provider, Resume: request.Resume, ForkFrom: request.ForkFrom, Name: "External conversation", Binary: request.EngineBinary, Model: request.Settings.Model, Effort: request.Settings.Effort, PermissionMode: provider.SessionAPIEngineMode(request.Settings.Mode), PublicAPI: true,
+	cfg := Config{ID: id, SessionID: request.ConversationID, Cwd: cwd, Kind: request.Provider, Resume: request.Resume, ForkFrom: request.ForkFrom, Name: "External conversation", Binary: request.EngineBinary, Model: request.Settings.Model, Effort: request.Settings.Effort, PermissionMode: provider.SessionAPIEngineMode(request.Settings.Mode), PublicAPI: true,
 		Account: provider.SessionAPIProfile(), Meta: apiMetadata(request.Metadata)}
 	if _, err := Spawn(cfg); err != nil {
 		return apiFailure(r, "unknown", "unknown")
