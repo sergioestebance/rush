@@ -34,7 +34,20 @@ type apiControl struct {
 	hasHistory         bool
 	stopped            bool
 	sequence           uint64
+
+	// confirmOperation and confirmKind name the API operation the running
+	// handshake settles; empty for a handshake the host began itself.
+	confirmOperation string
+	confirmKind      string
+	// confirmed holds the engine settings the last successful handshake on
+	// this host confirmed; nil until one has.
+	confirmed *apiEngineSettings
+	// apiStarting is set while initialize or prepare start an agent they
+	// confirm themselves, so the start does not also begin a host handshake.
+	apiStarting bool
 }
+
+type apiEngineSettings struct{ model, effort, mode string }
 
 type apiWatcher struct {
 	out   chan []byte
@@ -130,9 +143,19 @@ func (a *apiControl) agentStarted() {
 	a.ready = false
 	a.confirming = false
 	a.handshakeConfirmed = false
+	a.confirmOperation, a.confirmKind = "", ""
 	a.failure = nil
 	a.pending = map[string]RuntimePendingRequest{}
 	a.questions = map[string]event.Question{}
+	// The host replaced an agent this API had confirmed (a usage limit, an
+	// account swap, a wake): the new process gets the same execution
+	// handshake, with the settings last confirmed here, or it would never be
+	// ready. The first agent is confirmed by initialize, and an agent that
+	// initialize or prepare start is confirmed by them.
+	if a.confirmed != nil && !a.apiStarting {
+		c := *a.confirmed
+		a.confirm("", "", c)
+	}
 }
 
 func (a *apiControl) agentGone() {
@@ -141,6 +164,7 @@ func (a *apiControl) agentGone() {
 	a.ready = false
 	a.confirming = false
 	a.handshakeConfirmed = false
+	a.confirmOperation, a.confirmKind = "", ""
 	a.pending = map[string]RuntimePendingRequest{}
 	a.questions = map[string]event.Question{}
 }
@@ -411,7 +435,25 @@ func (a *apiControl) waitReady(ctx context.Context) bool {
 // Confirmation outlives a timed-out CLI exchange. Each provider request has its
 // own deadline; no private prompt is sent while startup is being reconciled.
 func (a *apiControl) startConfirmation(operation, kind string) {
+	a.confirm(operation, kind, apiEngineSettings{a.s.cfg.Model, a.s.cfg.Effort, a.s.cfg.PermissionMode})
+}
+
+// startAgent starts the host's agent for initialize or prepare, which then
+// confirm it themselves. Called with the host mutex held.
+func (a *apiControl) startAgent() error {
+	a.apiStarting = true
+	defer func() { a.apiStarting = false }()
+	return a.s.start()
+}
+
+// confirm runs the execution handshake once per agent. An API operation that
+// arrives while a host-begun handshake runs adopts it, so its receipt is
+// settled by that handshake rather than a second one racing it.
+func (a *apiControl) confirm(operation, kind string, settings apiEngineSettings) {
 	if a.confirming {
+		if a.confirmOperation == "" {
+			a.confirmOperation, a.confirmKind = operation, kind
+		}
 		return
 	}
 	conn := a.s.conn
@@ -423,10 +465,11 @@ func (a *apiControl) startConfirmation(operation, kind string) {
 		return
 	}
 	a.confirming = true
+	a.confirmOperation, a.confirmKind = operation, kind
 	a.ready = false
 	a.handshakeConfirmed = false
 	a.failure = nil
-	model, effort, mode := a.s.cfg.Model, a.s.cfg.Effort, a.s.cfg.PermissionMode
+	model, effort, mode := settings.model, settings.effort, settings.mode
 	go func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -446,6 +489,8 @@ func (a *apiControl) startConfirmation(operation, kind string) {
 			return
 		}
 		a.confirming = false
+		operation, kind := a.confirmOperation, a.confirmKind
+		a.confirmOperation, a.confirmKind = "", ""
 		if err != nil {
 			a.failure = APIError("unsupported", "unknown")
 			a.s.publish()
@@ -458,8 +503,11 @@ func (a *apiControl) startConfirmation(operation, kind string) {
 			a.s.publish()
 			return
 		}
-		if err := a.finish(operation, kind, "confirmed", ""); err != nil {
-			a.failure = APIError("unknown", "unknown")
+		a.confirmed = &settings
+		if operation != "" {
+			if err := a.finish(operation, kind, "confirmed", ""); err != nil {
+				a.failure = APIError("unknown", "unknown")
+			}
 		}
 		a.s.publish()
 	}()
@@ -494,7 +542,7 @@ func (a *apiControl) initialize(ctx context.Context, r APIRequest) APIResponse {
 		return apiFailure(r, "unknown", "unknown")
 	}
 	a.s.cfg.Model, a.s.cfg.Effort, a.s.cfg.PermissionMode = request.Settings.Model, request.Settings.Effort, apiEngineMode(a.s.cfg.Kind, request.Settings.Mode)
-	if err := a.s.start(); err != nil {
+	if err := a.startAgent(); err != nil {
 		a.s.mu.Unlock()
 		return apiFailure(r, "unknown", "unknown")
 	}
@@ -556,7 +604,7 @@ func (a *apiControl) prepare(ctx context.Context, r APIRequest) APIResponse {
 			return apiFailure(r, "stale", "unknown")
 		}
 		a.s.cfg.Model, a.s.cfg.Effort, a.s.cfg.PermissionMode = request.Settings.Model, request.Settings.Effort, apiEngineMode(a.s.cfg.Kind, request.Settings.Mode)
-		if err := a.s.start(); err != nil {
+		if err := a.startAgent(); err != nil {
 			a.s.mu.Unlock()
 			return apiFailure(r, "unknown", "unknown")
 		}
@@ -700,17 +748,29 @@ func (a *apiControl) answer(ctx context.Context, r APIRequest) APIResponse {
 		AnswerConfirmed(context.Context, string, bool, jsontext.Value) error
 	})
 	if !supported {
+		// Nothing was sent to the agent, so it cannot have taken effect.
+		_ = a.settle(request.OperationID, "answer", "rejected", "")
 		a.s.mu.Unlock()
 		return apiFailure(r, "unsupported", "not_applied")
 	}
 	a.s.mu.Unlock()
+	// A failed or cancelled exchange may still have reached the agent: the
+	// receipt stays unknown for the caller to reconcile.
 	if err := responder.AnswerConfirmed(ctx, pending.ID, request.Decision == "allow", o.Input); err != nil {
 		return apiFailure(r, "unknown", "unknown")
 	}
 	a.s.mu.Lock()
 	defer a.s.mu.Unlock()
 	if a.s.conn != conn {
-		return apiFailure(r, "unknown", "unknown")
+		// The agent confirmed the answer, then was replaced before the host
+		// recorded it. It took effect there (a call it allowed may have run),
+		// so it is confirmed against that incarnation: rejected would invite
+		// a retry of what was already done.
+		if err := a.settle(request.OperationID, "answer", "confirmed", pending.ID); err != nil {
+			return apiFailure(r, "unknown", "unknown")
+		}
+		receipt, _ := a.read(request.OperationID)
+		return apiSuccess(r, receipt)
 	}
 	a.s.answered(pending.ID)
 	a.resolve(pending.ID)
@@ -742,34 +802,78 @@ func (a *apiControl) interrupt(ctx context.Context, r APIRequest) APIResponse {
 		return apiFailure(r, "unknown", "unknown")
 	}
 	conn := a.s.conn
-	a.s.mu.Unlock()
 	interrupter, supported := conn.(interface{ InterruptConfirmed(context.Context) error })
 	if !supported {
+		// Nothing was sent to the agent, so it cannot have taken effect.
+		_ = a.settle(request.OperationID, "interrupt", "rejected", "")
+		a.s.mu.Unlock()
 		return apiFailure(r, "unsupported", "not_applied")
 	}
+	a.s.mu.Unlock()
+	// A failed or cancelled exchange may still have reached the agent: the
+	// receipt stays unknown for the caller to reconcile.
 	if interrupter.InterruptConfirmed(ctx) != nil {
 		return apiFailure(r, "unknown", "unknown")
 	}
 	for {
 		a.s.mu.Lock()
-		if a.s.conn != conn {
-			a.s.mu.Unlock()
-			return apiFailure(r, "unknown", "unknown")
-		}
-		if a.s.info.State == "idle" && a.state.Turn.ID == request.TurnID {
-			err := a.finish(request.OperationID, "interrupt", "confirmed", request.TurnID)
-			receipt, _ := a.read(request.OperationID)
-			a.s.mu.Unlock()
-			if err != nil {
-				return apiFailure(r, "unknown", "unknown")
-			}
-			return apiSuccess(r, receipt)
-		}
+		outcome, err := a.settleInterrupt(conn, request.OperationID, request.TurnID)
+		receipt, _ := a.read(request.OperationID)
 		a.s.mu.Unlock()
+		switch {
+		case err != nil:
+			return apiFailure(r, "unknown", "unknown")
+		case outcome == "confirmed":
+			return apiSuccess(r, receipt)
+		case outcome == "rejected":
+			return apiFailure(r, "stale", "not_applied")
+		}
 		select {
 		case <-ctx.Done():
+			// The agent accepted the interrupt, so it can still take effect
+			// after the caller stops waiting: rejecting it now could be false.
+			// This reply says unknown; the receipt is settled once the turn
+			// ends or its agent goes, whichever comes first.
+			go a.watchInterrupt(conn, request.OperationID, request.TurnID)
+			return apiFailure(r, "unknown", "unknown")
+		case <-a.s.quit:
 			return apiFailure(r, "unknown", "unknown")
 		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// settleInterrupt records an accepted interrupt's outcome once it is known:
+// confirmed when the turn it named has ended on the agent that accepted it,
+// rejected when that agent was replaced first, since the incarnation the
+// interrupt targeted no longer exists. Empty while the turn still runs.
+// Called with the host mutex held.
+func (a *apiControl) settleInterrupt(conn agent.Conn, operation, turnID string) (string, error) {
+	switch {
+	case a.s.conn != conn:
+		return "rejected", a.settle(operation, "interrupt", "rejected", "")
+	case a.s.info.State == "idle" || a.state.Turn.ID != turnID:
+		// Another turn ID means the named turn ended and a new one began.
+		return "confirmed", a.finish(operation, "interrupt", "confirmed", turnID)
+	}
+	return "", nil
+}
+
+// watchInterrupt settles an interrupt whose caller stopped waiting.
+func (a *apiControl) watchInterrupt(conn agent.Conn, operation, turnID string) {
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		a.s.mu.Lock()
+		outcome, err := a.settleInterrupt(conn, operation, turnID)
+		a.s.mu.Unlock()
+		if outcome != "" || err != nil {
+			return
+		}
+		select {
+		case <-a.s.quit:
+			return
+		case <-ticker.C:
 		}
 	}
 }
@@ -803,23 +907,51 @@ func (a *apiControl) stop(ctx context.Context, r APIRequest) APIResponse {
 				return apiFailure(r, "unknown", "unknown")
 			}
 		case <-ctx.Done():
+			// The close goes on after the caller stops waiting and takes
+			// effect, so the stop is not rejected: it completes once the
+			// agent has gone, receipt included. A failed close stays unknown.
+			go func() {
+				if <-gone != nil {
+					return
+				}
+				a.s.mu.Lock()
+				_, outcome, err := a.completeStop(request.OperationID, conn)
+				a.s.mu.Unlock()
+				if err == nil && outcome == "confirmed" {
+					a.s.stopOnce.Do(func() { close(a.s.quit) })
+				}
+			}()
 			return apiFailure(r, "unknown", "unknown")
 		}
 	}
 	a.s.mu.Lock()
 	defer a.s.mu.Unlock()
+	receipt, outcome, err := a.completeStop(request.OperationID, conn)
+	switch {
+	case err != nil:
+		return apiFailure(r, "unknown", "unknown")
+	case outcome == "rejected":
+		return apiFailure(r, "stale", "not_applied")
+	}
+	return apiSuccess(r, receipt)
+}
+
+// completeStop settles a stop once the agent it closed has gone. If the host
+// started another agent meanwhile, that one runs on and the host was not
+// stopped, so the stop is rejected. Called with the host mutex held.
+func (a *apiControl) completeStop(operation string, conn agent.Conn) (RuntimeReceipt, string, error) {
 	if a.s.conn != nil && a.s.conn != conn {
-		return apiFailure(r, "unknown", "unknown")
+		return RuntimeReceipt{}, "rejected", a.settle(operation, "stop", "rejected", "")
 	}
-	if err := a.finish(request.OperationID, "stop", "confirmed", ""); err != nil {
-		return apiFailure(r, "unknown", "unknown")
+	if err := a.finish(operation, "stop", "confirmed", ""); err != nil {
+		return RuntimeReceipt{}, "", err
 	}
-	receipt, _ := a.read(request.OperationID)
+	receipt, _ := a.read(operation)
 	a.s.detach()
 	a.stopped = true
 	a.s.info.State = "stopped"
 	a.s.publish()
-	return apiSuccess(r, receipt)
+	return receipt, "confirmed", nil
 }
 
 // APIEvents subscribes without waking or starting an unrelated host.

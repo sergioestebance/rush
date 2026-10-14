@@ -100,11 +100,22 @@ func (a *apiControl) begin(operation, kind string, params []byte) error {
 }
 
 func (a *apiControl) finish(operation, kind, outcome, related string) error {
+	return a.record(operation, kind, outcome, related, kind != "stop")
+}
+
+// settle records an outcome against the identity the operation began under.
+// An operation cut off by an agent change names the incarnation it targeted,
+// not the one that replaced it.
+func (a *apiControl) settle(operation, kind, outcome, related string) error {
+	return a.record(operation, kind, outcome, related, false)
+}
+
+func (a *apiControl) record(operation, kind, outcome, related string, current bool) error {
 	entry, err := apiReadLedger(a.s.cfg.ID, operation)
 	if err != nil {
 		return err
 	}
-	if kind != "stop" {
+	if current {
 		entry.Receipt.Identity = a.state.Identity
 	}
 	entry.Receipt.Kind, entry.Receipt.Outcome = kind, outcome
