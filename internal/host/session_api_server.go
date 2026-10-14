@@ -472,7 +472,7 @@ func (a *apiControl) initialize(ctx context.Context, r APIRequest) APIResponse {
 	}
 	a.s.mu.Lock()
 	if request.ConversationID != a.state.Identity.ConversationID || request.Metadata != a.state.Identity.Metadata ||
-		request.Cwd != a.s.cfg.Cwd && !apiReplaysInitialize(a.s.cfg.ID, request.OperationID, r.Params) {
+		request.Cwd != a.s.cfg.Cwd && request.Cwd != a.s.startCwd && !apiReplaysInitialize(a.s.cfg.ID, request.OperationID, r.Params) {
 		a.s.mu.Unlock()
 		return apiFailure(r, "conflict", "not_applied")
 	}
