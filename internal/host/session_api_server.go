@@ -29,11 +29,14 @@ type apiControl struct {
 	ready              bool
 	confirming         bool
 	handshakeConfirmed bool
-	failure            *RuntimeError
-	hadAgent           bool
-	hasHistory         bool
-	stopped            bool
-	sequence           uint64
+	// cwdConfirmed is set once this agent process reported the folder it was
+	// spawned in. Later reports name wherever its shell went since.
+	cwdConfirmed bool
+	failure      *RuntimeError
+	hadAgent     bool
+	hasHistory   bool
+	stopped      bool
+	sequence     uint64
 
 	// confirmOperation and confirmKind name the API operation the running
 	// handshake settles; empty for a handshake the host began itself.
@@ -143,6 +146,7 @@ func (a *apiControl) agentStarted() {
 	a.ready = false
 	a.confirming = false
 	a.handshakeConfirmed = false
+	a.cwdConfirmed = false
 	a.confirmOperation, a.confirmKind = "", ""
 	a.failure = nil
 	a.pending = map[string]RuntimePendingRequest{}
@@ -164,6 +168,7 @@ func (a *apiControl) agentGone() {
 	a.ready = false
 	a.confirming = false
 	a.handshakeConfirmed = false
+	a.cwdConfirmed = false
 	a.confirmOperation, a.confirmKind = "", ""
 	a.pending = map[string]RuntimePendingRequest{}
 	a.questions = map[string]event.Question{}
@@ -246,9 +251,12 @@ func (a *apiControl) onEvent(ev event.Event) {
 			settings.Effort = a.state.Settings.Effort
 		}
 		wanted := RuntimeSettings{Model: a.s.cfg.Model, Effort: a.s.cfg.Effort, Mode: apiMode(a.s.cfg.Kind, a.s.cfg.PermissionMode)}
-		// A cd the host followed moves its config, not the provider process:
-		// that keeps reporting the folder it was spawned in until a restart.
-		cwd := e.Cwd == a.s.startCwd || e.Cwd == a.s.cfg.Cwd
+		// Claude reports its shell's folder, so only the first report of a
+		// process checks where it was spawned: after that a cd into a
+		// subfolder or another checkout must not take a live agent out of
+		// ready.
+		cwd := a.cwdConfirmed || e.Cwd == a.s.startCwd || e.Cwd == a.s.cfg.Cwd
+		a.cwdConfirmed = cwd
 		a.ready = false
 		if a.handshakeConfirmed && e.SessionID == a.state.Identity.ConversationID && cwd && settings == wanted && settings.Validate() == nil {
 			a.state.Settings = settings

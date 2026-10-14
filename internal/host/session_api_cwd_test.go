@@ -71,3 +71,36 @@ func TestPublicInitializeAfterCwdFollowAcceptsSpawnFolder(t *testing.T) {
 		})
 	}
 }
+
+// Claude reports its shell's folder on every turn. Once a process reported
+// where it was spawned, a cd into a subfolder or another checkout keeps it
+// ready; a new process checks its folder again.
+func TestPublicInitAfterAgentCdKeepsAgentReady(t *testing.T) {
+	conversation, _ := NewSessionID()
+	s := &server{cfg: Config{Kind: "claude", Cwd: "/work", Model: "opus", Effort: "medium", PermissionMode: "auto"}, startCwd: "/work"}
+	a := &apiControl{s: s, handshakeConfirmed: true}
+	a.state.Identity.ConversationID = conversation
+	init := func(cwd string) {
+		a.onEvent(event.Init{SessionID: conversation, Cwd: cwd, Model: "claude-opus-4-5", Effort: "medium", Mode: "auto"})
+	}
+	init("/elsewhere")
+	if a.ready {
+		t.Fatal("a process spawned elsewhere is ready")
+	}
+	init("/work")
+	if !a.ready {
+		t.Fatal("the spawn folder did not confirm the agent")
+	}
+	for _, cwd := range []string{"/work/packages/kit", "/work/.claude/worktrees/other"} {
+		init(cwd)
+		if !a.ready {
+			t.Fatalf("a turn in %s took the agent out of ready", cwd)
+		}
+	}
+	a.agentStarted()
+	a.handshakeConfirmed = true
+	init("/work/packages/kit")
+	if a.ready {
+		t.Fatal("a new process reporting another folder is ready")
+	}
+}
