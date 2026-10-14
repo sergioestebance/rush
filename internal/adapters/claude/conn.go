@@ -425,11 +425,17 @@ func (c *conn) Send(in agent.Input) error {
 
 // SendConfirmed is for receipt-bearing host operations. Legacy Send keeps its
 // nonblocking behavior, while this method confirms the write to provider stdin.
-func (c *conn) SendConfirmed(ctx context.Context, in agent.Input) error {
-	if len(in.Images) > 0 {
-		return errors.New("confirmed image delivery is unsupported")
+// Its images are already in memory; each goes where the text names it.
+func (c *conn) SendConfirmed(ctx context.Context, text string, images []agent.Image) error {
+	var content any = text
+	if len(images) > 0 {
+		imgs := make([]headless.Image, len(images))
+		for i, im := range images {
+			imgs[i] = headless.Image{MediaType: im.MediaType, Data: im.Data}
+		}
+		content = headless.Content(text, imgs)
 	}
-	return c.s.WriteConfirmed(ctx, map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": in.Text}})
+	return c.s.WriteConfirmed(ctx, map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": content}})
 }
 
 // InitializeExecution reads effective state from the live provider before any

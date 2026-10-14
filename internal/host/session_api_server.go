@@ -588,7 +588,36 @@ func (a *apiControl) send(ctx context.Context, r APIRequest) APIResponse {
 		a.s.mu.Unlock()
 		return apiSuccess(r, previous)
 	}
-	if !a.ready || a.s.info.State != "idle" || a.state.Settings != request.Settings || a.s.conn == nil {
+	idle := func() bool {
+		return a.ready && a.s.info.State == "idle" && a.state.Settings == request.Settings && a.s.conn != nil
+	}
+	if !idle() {
+		a.s.mu.Unlock()
+		return apiFailure(r, "busy", "not_applied")
+	}
+	conn := a.s.conn
+	writer, ok := conn.(interface {
+		SendConfirmed(context.Context, string, []agent.Image) error
+	})
+	if !ok {
+		a.s.mu.Unlock()
+		return apiFailure(r, "unsupported", "not_applied")
+	}
+	// Every image is in memory and checked before anything is recorded or
+	// submitted, so a bad file refuses the send with no turn begun. A repeat
+	// of a recorded send returned above, without reading files the daemon
+	// may since have deleted.
+	a.s.mu.Unlock()
+	images, err := apiReadImages(request.Images)
+	if err != nil {
+		return apiFailure(r, "invalid_input", "not_applied")
+	}
+	a.s.mu.Lock()
+	if a.state.Identity.Matches(request.Expected) != nil {
+		a.s.mu.Unlock()
+		return apiFailure(r, "stale", "not_applied")
+	}
+	if !idle() || a.s.conn != conn {
 		a.s.mu.Unlock()
 		return apiFailure(r, "busy", "not_applied")
 	}
@@ -600,17 +629,9 @@ func (a *apiControl) send(ctx context.Context, r APIRequest) APIResponse {
 	a.state.Turn.ID = turnID
 	a.s.info.State = "working"
 	a.state.Turn.State = "working"
-	conn := a.s.conn
-	writer, ok := conn.(interface {
-		SendConfirmed(context.Context, agent.Input) error
-	})
-	if !ok {
-		a.s.mu.Unlock()
-		return apiFailure(r, "unsupported", "not_applied")
-	}
 	a.s.publish()
 	a.s.mu.Unlock()
-	if err := writer.SendConfirmed(ctx, agent.Input{Text: request.Text}); err != nil {
+	if err := writer.SendConfirmed(ctx, request.Text, images); err != nil {
 		return apiFailure(r, "unknown", "unknown")
 	}
 	a.s.mu.Lock()

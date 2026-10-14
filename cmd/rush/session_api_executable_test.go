@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -332,4 +335,95 @@ func TestPublicExecutableReplayKeepsTheFollowedFolder(t *testing.T) {
 		op, _ := host.NewSessionID()
 		h.call(t, "stop", host.RuntimeStopRequest{OperationID: op, Expected: expected}, nil)
 	})
+}
+
+// The daemon hands each image over as a file it deletes once the message
+// leaves its queue. The runtime reads and checks them all before the provider
+// sees anything, so a bad file starts no turn, and never reads them again.
+func TestPublicExecutableSendsImagesAndRefusesBadFiles(t *testing.T) {
+	h := newPublicAPIHarness(t)
+	var capabilities host.RuntimeCapabilities
+	if response := h.call(t, "probe", map[string]any{}, &capabilities); !response.OK {
+		t.Fatalf("probe: %+v", response)
+	}
+	imageInput := false
+	for _, p := range capabilities.Providers {
+		imageInput = imageInput || p.Kind == "claude" && slices.Contains(p.Features, "image_input")
+	}
+	if !imageInput {
+		t.Fatalf("claude does not report image_input: %+v", capabilities.Providers)
+	}
+
+	state := h.initialize(t, "images")
+	attach := filepath.Join(filepath.Dir(h.dir), "attach")
+	if err := os.MkdirAll(attach, 0700); err != nil {
+		t.Fatal(err)
+	}
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n', 'p', 'n', 'g'}
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xE0, 'j', 'p', 'e', 'g'}
+	pngPath, jpegPath := filepath.Join(attach, "1.png"), filepath.Join(attach, "2.jpg")
+	for path, b := range map[string][]byte{pngPath: png, jpegPath: jpeg} {
+		if err := os.WriteFile(path, b, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lookup := host.RuntimeLookup{ConversationID: state.Identity.ConversationID, HostID: state.Identity.HostID, Metadata: state.Identity.Metadata}
+	for _, tc := range []struct {
+		name   string
+		images []host.RuntimeImage
+	}{
+		{"missing file", []host.RuntimeImage{{Path: pngPath, MediaType: "image/png"}, {Path: filepath.Join(attach, "gone.jpg"), MediaType: "image/jpeg"}}},
+		{"bytes do not match the type", []host.RuntimeImage{{Path: jpegPath, MediaType: "image/png"}}},
+		{"unsupported type", []host.RuntimeImage{{Path: pngPath, MediaType: "image/gif"}}},
+	} {
+		operation, _ := host.NewSessionID()
+		send := host.RuntimeSendRequest{OperationID: operation, Expected: state.Identity, RequireTurnState: "idle", Settings: state.Settings, Text: "[Image #1]", Images: tc.images}
+		if response := h.call(t, "send", send, nil); response.OK || response.Error == nil || response.Error.Code != "invalid_input" || response.Error.Outcome != "not_applied" {
+			t.Fatalf("%s: %+v", tc.name, response)
+		}
+		var receipt host.RuntimeReceipt
+		if response := h.call(t, "receipt", host.RuntimeReceiptLookup{OperationID: operation, Expected: lookup}, &receipt); !response.OK || receipt.Outcome != "not_known" {
+			t.Fatalf("%s left a receipt: %+v %+v", tc.name, response, receipt)
+		}
+		if turn := h.inspect(t, state.Identity).Turn; turn.State != "idle" || turn.ID != "" {
+			t.Fatalf("%s started a turn: %+v", tc.name, turn)
+		}
+		if data, _ := os.ReadFile(h.log); len(data) != 0 {
+			t.Fatalf("%s reached the provider: %s", tc.name, data)
+		}
+	}
+
+	operation, _ := host.NewSessionID()
+	send := host.RuntimeSendRequest{OperationID: operation, Expected: state.Identity, RequireTurnState: "idle", Settings: state.Settings,
+		Text: "First [Image #1] then [Image #2]", Images: []host.RuntimeImage{{Path: pngPath, MediaType: "image/png"}, {Path: jpegPath, MediaType: "image/jpeg"}}}
+	var first, duplicate host.RuntimeReceipt
+	if response := h.call(t, "send", send, &first); !response.OK || first.Validate(state.Identity, operation, "send") != nil || first.Outcome != "delivered" {
+		t.Fatalf("image send: %+v %+v", response, first)
+	}
+	// The daemon deletes the files once delivered; a repeat still finds its receipt.
+	os.Remove(pngPath)
+	os.Remove(jpegPath)
+	if response := h.call(t, "send", send, &duplicate); !response.OK || duplicate.TurnID != first.TurnID {
+		t.Fatalf("repeated image send: %+v", response)
+	}
+	data, _ := os.ReadFile(h.log)
+	if bytes.Count(data, []byte("\n")) != 1 {
+		t.Fatalf("want one provider message: %s", data)
+	}
+	var logged struct {
+		Text []map[string]any `json:"text"`
+	}
+	if err := json.Unmarshal(data, &logged); err != nil {
+		t.Fatalf("provider content is not blocks: %v %s", err, data)
+	}
+	image := func(mediaType string, b []byte) map[string]any {
+		return map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": mediaType, "data": base64.StdEncoding.EncodeToString(b)}}
+	}
+	want := []map[string]any{
+		{"type": "text", "text": "First [Image #1]"}, image("image/png", png),
+		{"type": "text", "text": " then [Image #2]"}, image("image/jpeg", jpeg),
+	}
+	if !reflect.DeepEqual(logged.Text, want) {
+		t.Fatalf("provider content = %+v\nwant %+v", logged.Text, want)
+	}
 }
