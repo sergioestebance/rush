@@ -321,21 +321,49 @@ func (r RuntimePrepareRequest) Validate() error {
 	return r.Settings.Validate()
 }
 
+// RuntimeImage names one image file the host reads before it submits the
+// message. Element N of a send's images is the one its text names [Image #N].
+type RuntimeImage struct {
+	Path      string `json:"path"`
+	MediaType string `json:"mediaType"`
+}
+
+// Validate checks the name only; apiReadImages checks the file itself.
+func (i RuntimeImage) Validate() error {
+	if i.MediaType != "image/jpeg" && i.MediaType != "image/png" {
+		return errors.New("runtime: unsupported image media type")
+	}
+	if !filepath.IsAbs(i.Path) || filepath.Clean(i.Path) != i.Path || strings.IndexByte(i.Path, 0) >= 0 {
+		return errors.New("runtime: invalid image path")
+	}
+	return nil
+}
+
 type RuntimeSendRequest struct {
 	OperationID      string          `json:"operationId"`
 	Expected         RuntimeIdentity `json:"expected"`
 	RequireTurnState string          `json:"requireTurnState"`
 	Settings         RuntimeSettings `json:"settings"`
 	Text             string          `json:"text"`
+	Images           []RuntimeImage  `json:"images,omitempty"`
 }
 
 // Validate refuses a send that could reach a different writer or an active turn.
+// Text is never blank, even when it only names its images.
 func (r RuntimeSendRequest) Validate() error {
 	if err := r.Expected.Validate(true); err != nil {
 		return err
 	}
 	if !runtimeUUID(r.OperationID) || r.RequireTurnState != "idle" || strings.TrimSpace(r.Text) == "" || !utf8.ValidString(r.Text) {
 		return errors.New("runtime: invalid conditional send")
+	}
+	if len(r.Images) > APIImageCount {
+		return errors.New("runtime: too many images")
+	}
+	for _, image := range r.Images {
+		if err := image.Validate(); err != nil {
+			return err
+		}
 	}
 	return r.Settings.Validate()
 }

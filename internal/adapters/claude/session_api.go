@@ -9,7 +9,7 @@ import (
 // SessionAPIFeatures advertises only capabilities the headless adapter can
 // confirm and control through the public host API.
 func (Adapter) SessionAPIFeatures() []string {
-	return []string{"explicit_settings", "auto_permissions", "structured_questions"}
+	return []string{"explicit_settings", "auto_permissions", "structured_questions", "image_input"}
 }
 
 func (a Adapter) SessionAPIProfile() agent.Profile { return a.Home() }

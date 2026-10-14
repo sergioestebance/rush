@@ -171,6 +171,13 @@ type Input struct {
 	Images []string // paths
 }
 
+// Image is a picture already read into memory and checked, for a send that
+// must not keep its file's path.
+type Image struct {
+	MediaType string // image/jpeg or image/png
+	Data      []byte
+}
+
 // HistoryReader reads a session's transcript back as the events a live
 // session sends.
 type HistoryReader interface {
