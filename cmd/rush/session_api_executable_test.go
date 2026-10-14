@@ -121,12 +121,16 @@ func (h publicAPIHarness) call(t *testing.T, method string, params any, result a
 	return response
 }
 
-func (h publicAPIHarness) initialize(t *testing.T, chat string) host.RuntimeState {
-	t.Helper()
+func (h publicAPIHarness) request(chat string) host.RuntimeInitializeRequest {
 	conversation, _ := host.NewSessionID()
 	installation, _ := host.NewSessionID()
 	operation, _ := host.NewSessionID()
-	request := host.RuntimeInitializeRequest{ConversationID: conversation, OperationID: operation, Metadata: host.RuntimeOwnership{Version: "1", Installation: installation, Chat: chat, Operation: operation}, Cwd: h.dir, Provider: "claude", EngineBinary: h.engine, Settings: host.RuntimeSettings{Model: "opus", Effort: "medium", Mode: "auto"}}
+	return host.RuntimeInitializeRequest{ConversationID: conversation, OperationID: operation, Metadata: host.RuntimeOwnership{Version: "1", Installation: installation, Chat: chat, Operation: operation}, Cwd: h.dir, Provider: "claude", EngineBinary: h.engine, Settings: host.RuntimeSettings{Model: "opus", Effort: "medium", Mode: "auto"}}
+}
+
+func (h publicAPIHarness) initialize(t *testing.T, chat string) host.RuntimeState {
+	t.Helper()
+	request := h.request(chat)
 	var state host.RuntimeState
 	response := h.call(t, "initialize", request, &state)
 	if !response.OK || state.ValidateReady(request) != nil {
@@ -263,4 +267,69 @@ func TestPublicExecutableSnapshotsAndNativeQuestions(t *testing.T) {
 	if response := h.call(t, "answer", answer, nil); response.OK || response.Error == nil || response.Error.Code != "stale" {
 		t.Fatalf("old agent answer accepted: %+v", response)
 	}
+}
+
+// A host follows its agent to another folder, while its owner only knows the
+// folder it first asked for. Repeating that exact initialization, after a
+// restart or after the host stopped, resumes where the agent went.
+func TestPublicExecutableReplayKeepsTheFollowedFolder(t *testing.T) {
+	h := newPublicAPIHarness(t)
+	request := h.request("moved")
+	var state host.RuntimeState
+	if response := h.call(t, "initialize", request, &state); !response.OK || state.ValidateReady(request) != nil {
+		t.Fatalf("not engine-ready: %+v %+v", response, state)
+	}
+	id := host.ShortID(request.ConversationID)
+	moved := filepath.Join(filepath.Dir(h.dir), "moved")
+	if err := os.MkdirAll(moved, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, restart := range []bool{true, false} {
+		expected := state.Identity
+		expected.AgentIncarnation = ""
+		op, _ := host.NewSessionID()
+		if response := h.call(t, "stop", host.RuntimeStopRequest{OperationID: op, Expected: expected}, nil); !response.OK {
+			t.Fatalf("stop: %+v", response)
+		}
+		for deadline := time.Now().Add(10 * time.Second); ; {
+			if info, err := host.ReadInfo(id); err != nil || !host.Alive(info.HostPID) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("host did not exit")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		// What the host saves when its agent moves.
+		cfg, err := host.ReadConfig(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Cwd = moved
+		b, _ := json.Marshal(cfg)
+		if err = os.WriteFile(filepath.Join(host.Root(), id, "config.json"), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if restart {
+			if out, err := exec.Command(h.binary, "session", "start", "--session-id", request.ConversationID, "--resume", "--json").CombinedOutput(); err != nil {
+				t.Fatalf("restart: %v %s", err, out)
+			}
+		}
+		if response := h.call(t, "initialize", request, &state); !response.OK || state.Phase != "ready" || state.Cwd != moved {
+			t.Fatalf("restart %v: replay lost the followed folder: %+v %+v", restart, response, state)
+		}
+	}
+	// Only the recorded request earns the followed folder: another folder is
+	// still refused.
+	changed := request
+	changed.Cwd = filepath.Dir(h.dir)
+	if response := h.call(t, "initialize", changed, nil); response.OK || response.Error == nil || response.Error.Code != "conflict" {
+		t.Fatalf("a changed initialization was accepted: %+v", response)
+	}
+	t.Cleanup(func() {
+		expected := state.Identity
+		expected.AgentIncarnation = ""
+		op, _ := host.NewSessionID()
+		h.call(t, "stop", host.RuntimeStopRequest{OperationID: op, Expected: expected}, nil)
+	})
 }
