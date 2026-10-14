@@ -263,7 +263,12 @@ func (a *apiControl) onEvent(ev event.Event) {
 			a.ready = true
 		}
 	case event.Approval:
-		input, _ := json.Marshal(e.Call.Input)
+		// The call's input as the agent sent it, in its own field names:
+		// what rush reads of it is for rush, not for the owner to see.
+		input := json.RawMessage(e.Call.Raw)
+		if len(input) == 0 {
+			input, _ = json.Marshal(e.Call.Input)
+		}
 		p := RuntimePendingRequest{ID: e.ID, AgentIncarnation: a.state.Identity.AgentIncarnation, Kind: "approval", Tool: e.Call.Name, CallID: e.Call.ID, Input: input, Reason: e.Reason}
 		a.addPending(p)
 	case event.Question:
@@ -747,9 +752,9 @@ func (a *apiControl) answer(ctx context.Context, r APIRequest) APIResponse {
 				}
 			}
 			o.Input = AnswerInput(&question, mapped)
-		} else {
-			o.Input = jsontext.Value(pending.Input)
 		}
+		// An approval leaves the input unset: the writer answers with the
+		// request's own, exactly as the agent asked it.
 	}
 	conn := a.s.conn
 	responder, supported := conn.(interface {
