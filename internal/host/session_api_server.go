@@ -222,8 +222,11 @@ func (a *apiControl) onEvent(ev event.Event) {
 			settings.Effort = a.state.Settings.Effort
 		}
 		wanted := RuntimeSettings{Model: a.s.cfg.Model, Effort: a.s.cfg.Effort, Mode: apiMode(a.s.cfg.Kind, a.s.cfg.PermissionMode)}
+		// A cd the host followed moves its config, not the provider process:
+		// that keeps reporting the folder it was spawned in until a restart.
+		cwd := e.Cwd == a.s.startCwd || e.Cwd == a.s.cfg.Cwd
 		a.ready = false
-		if a.handshakeConfirmed && e.SessionID == a.state.Identity.ConversationID && e.Cwd == a.s.cfg.Cwd && settings == wanted && settings.Validate() == nil {
+		if a.handshakeConfirmed && e.SessionID == a.state.Identity.ConversationID && cwd && settings == wanted && settings.Validate() == nil {
 			a.state.Settings = settings
 			a.ready = true
 		}
