@@ -186,11 +186,16 @@ func TestWebControlsReachTheHost(t *testing.T) {
 	post := func(path, body string) *httptest.ResponseRecorder { return do(t, h, "POST", path, body, hdr) }
 
 	// create
-	if w := post("/api/sessions", `{"cwd":"/work","agent":"claude","prompt":"go","name":"n"}`); w.Code != 200 {
+	if w := post("/api/sessions", `{"cwd":"/work","agent":"claude","prompt":"go","name":"n","meta":{"owner":"app"}}`); w.Code != 200 {
 		t.Fatalf("create: %d %s", w.Code, w.Body)
 	}
-	if started.Cwd != "/work" || started.Agent != "claude" || started.Prompt != "go" || started.Name != "n" {
+	if started.Cwd != "/work" || started.Agent != "claude" || started.Prompt != "go" || started.Name != "n" || started.Meta["owner"] != "app" {
 		t.Fatalf("start request: %+v", started)
+	}
+	for _, body := range []string{`{"cwd":"/work","meta":{"spawnedBy":"x"}}`, `{"cwd":"/work","meta":{"":"x"}}`} {
+		if w := post("/api/sessions", body); w.Code != http.StatusBadRequest {
+			t.Fatalf("bad labels %s: %d %s", body, w.Code, w.Body)
+		}
 	}
 	for _, c := range []struct {
 		name, body string

@@ -62,6 +62,26 @@ type StartRequest struct {
 	// Resume is the session id of a past session rush didn't start (see
 	// Other): it carries on in rush, with its own agent and folder.
 	Resume string `json:"resume,omitempty"`
+	// Meta is labels the host carries in its info, for the client that
+	// started it to know its own sessions by (an owner, a chat id).
+	Meta map[string]string `json:"meta,omitempty"`
+}
+
+// metaOK is whether labels a remote client asked for are fit to store:
+// a few short ones, none of rush's own.
+func metaOK(m map[string]string) error {
+	if len(m) > 16 {
+		return errors.New("at most 16 labels")
+	}
+	for k, v := range m {
+		if k == "" || len(k) > 64 || len(v) > 512 {
+			return errors.New("a label's name must be 1 to 64 bytes and its value at most 512")
+		}
+		if k == "spawnedBy" {
+			return errors.New("label " + k + " is rush's own")
+		}
+	}
+	return nil
 }
 
 // Session is a session as serve lists it.
@@ -263,6 +283,10 @@ func (s *Server) list(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	var req StartRequest
 	if err := readJSON(r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := metaOK(req.Meta); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}

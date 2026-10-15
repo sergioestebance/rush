@@ -57,7 +57,7 @@ func serveCmd(args []string) error {
 	}
 	srv := &remote.Server{Config: cfg, Token: tok, Push: push, Start: func(r remote.StartRequest) (host.Info, error) {
 		return startSession(startOpts{Cwd: r.Cwd, Kind: r.Agent, Profile: r.Profile, Prompt: r.Prompt,
-			Model: r.Model, Effort: r.Effort, Name: r.Name, SessionID: r.Resume, Resume: r.Resume != ""})
+			Model: r.Model, Effort: r.Effort, Name: r.Name, SessionID: r.Resume, Resume: r.Resume != "", Meta: r.Meta})
 	}}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
