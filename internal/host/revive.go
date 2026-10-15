@@ -32,8 +32,11 @@ func Revive(info Info) error {
 	if !info.Lost || time.Since(info.UpdatedAt) > reviveWithin || testing.Testing() {
 		return nil // a test's records are never started with the test binary
 	}
-	if cfg, err := ReadConfig(info.ID); err != nil || cfg.Owner > 0 {
-		return err // a stand-in's run ended with the program that started it
+	if cfg, err := ReadConfig(info.ID); err != nil || cfg.Owner > 0 || cfg.PublicAPI {
+		// A stand-in's run ended with the program that started it; an
+		// embedded host is its owner's to bring back, and never told
+		// anything by rush.
+		return err
 	}
 	mark := filepath.Join(dir(info.ID), "revived")
 	if st, err := os.Stat(mark); err == nil && time.Since(st.ModTime()) < 10*time.Minute {

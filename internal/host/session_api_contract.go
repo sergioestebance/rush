@@ -126,10 +126,19 @@ type RuntimeCursor struct {
 }
 
 // RuntimeState is observed execution state, never an echo of queued app messages.
+//
+// Phase is one of host_starting, agent_starting, ready, sleeping, failed and
+// stopped. PhaseSince is when it was entered. Deadline is set while a phase
+// is bounded (agent_starting ends in ready or failed by then); a phase past
+// its deadline is the host's fault, never the owner's to wait out. Failure
+// says why the host is failed; a new initialize or prepare clears it.
 type RuntimeState struct {
 	Identity          RuntimeIdentity `json:"identity"`
 	Build             RuntimeBuild    `json:"build"`
 	Phase             string          `json:"phase"`
+	PhaseSince        time.Time       `json:"phaseSince,omitzero"`
+	Deadline          time.Time       `json:"deadline,omitzero"`
+	Failure           *RuntimeError   `json:"failure,omitempty"`
 	Turn              RuntimeTurn     `json:"turn"`
 	Cwd               string          `json:"cwd"`
 	Settings          RuntimeSettings `json:"settings"`
@@ -397,11 +406,17 @@ type RuntimeReceipt struct {
 
 // Validate refuses receipts from another operation, host or agent incarnation.
 // Validation preserves unknown/not-known outcomes; it never converts them to sent.
+// A delete receipt names the conversation, host and owner only: the host it
+// removed may never have recorded an incarnation.
 func (r RuntimeReceipt) Validate(expected RuntimeIdentity, operation, kind string) error {
 	if !runtimeUUID(operation) || r.OperationID != operation || r.Kind != kind {
 		return errors.New("runtime: receipt does not name the operation")
 	}
-	if err := r.Identity.Matches(expected); err != nil {
+	if kind == "delete" {
+		if r.Identity.ConversationID != expected.ConversationID || r.Identity.HostID != expected.HostID || r.Identity.Metadata != expected.Metadata {
+			return errors.New("runtime: delete receipt names another conversation")
+		}
+	} else if err := r.Identity.Matches(expected); err != nil {
 		return err
 	}
 	switch r.Outcome {
@@ -423,7 +438,7 @@ func (r RuntimeReceipt) Validate(expected RuntimeIdentity, operation, kind strin
 			if expected.AgentIncarnation == "" || !runtimeUUID(r.TurnID) {
 				return errors.New("runtime: incomplete interrupt receipt")
 			}
-		case "stop":
+		case "stop", "delete":
 		default:
 			return errors.New("runtime: invalid confirmed receipt kind")
 		}
@@ -582,6 +597,26 @@ func (r RuntimeStopRequest) Validate() error {
 	}
 	if !runtimeUUID(r.OperationID) {
 		return errors.New("runtime: invalid stop operation")
+	}
+	return nil
+}
+
+// RuntimeDeleteRequest removes a conversation's host for good: its process,
+// its folder and its scratch. It names the host as inspect does, since the
+// host may be dead, failed or never recorded a state; it never needs a live
+// incarnation. Absence is the proof: a repeat is confirmed again.
+type RuntimeDeleteRequest struct {
+	OperationID string        `json:"operationId"`
+	Expected    RuntimeLookup `json:"expected"`
+}
+
+// Validate names one removal of one owned conversation.
+func (r RuntimeDeleteRequest) Validate() error {
+	if err := r.Expected.Validate(); err != nil {
+		return err
+	}
+	if !runtimeUUID(r.OperationID) {
+		return errors.New("runtime: invalid delete operation")
 	}
 	return nil
 }
