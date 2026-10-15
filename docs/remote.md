@@ -17,6 +17,8 @@ server in front of those hosts. This is the simpler plan that replaced
   `127.0.0.1:7878` by default, and only ever runs work on its own machine.
   - `GET /api/sessions` lists sessions, like `rush session list`.
   - `POST /api/sessions` starts one, through `rush session start`'s own code.
+    `meta` sets labels the host's info carries, so the client that started it
+    can tell its own sessions apart (at most 16, none of rush's own).
   - `GET /api/sessions/{id}/events` is a Server-Sent Events stream. A running
     host's lines are decoded and sent as neutral events (`{"t":…,"e":…}`),
     with the host's replay first. A host that isn't running sends its saved
