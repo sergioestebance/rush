@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/json/jsontext"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -17,6 +18,11 @@ import (
 	"github.com/0xdeafcafe/rush/internal/agent"
 	"github.com/0xdeafcafe/rush/internal/agent/event"
 )
+
+// apiReadyWithin is how long an agent has from its start to confirm it's
+// ready. Past it the host is failed and the agent retired, so no owner waits
+// on a start that will never finish. A var, for tests.
+var apiReadyWithin = 2 * time.Minute
 
 type apiControl struct {
 	s                  *server
@@ -33,6 +39,7 @@ type apiControl struct {
 	// spawned in. Later reports name wherever its shell went since.
 	cwdConfirmed bool
 	failure      *RuntimeError
+	since        time.Time // when the state's phase was entered
 	hadAgent     bool
 	hasHistory   bool
 	stopped      bool
@@ -85,7 +92,8 @@ func (w *apiWatcher) close() { w.once.Do(func() { close(w.done) }) }
 func newAPIControl(s *server) *apiControl {
 	hostID, _ := NewSessionID()
 	o := RuntimeOwnership{Version: s.cfg.Meta["amtana_metadata_version"], Installation: s.cfg.Meta["amtana_installation"], Chat: s.cfg.Meta["amtana_chat"], Operation: s.cfg.Meta["amtana_operation"]}
-	return &apiControl{s: s, hasHistory: s.cfg.Resume || s.cfg.ForkFrom != "", pending: map[string]RuntimePendingRequest{}, questions: map[string]event.Question{}, watchers: map[*apiWatcher]struct{}{}, state: RuntimeState{Identity: RuntimeIdentity{ConversationID: s.cfg.SessionID, HostID: s.cfg.ID, HostIncarnation: hostID, Metadata: o}, Build: apiBuild(), Cwd: s.cfg.Cwd, Phase: "host_starting", Settings: RuntimeSettings{Model: s.cfg.Model, Effort: s.cfg.Effort, Mode: apiMode(s.cfg.Kind, s.cfg.PermissionMode)}, Turn: RuntimeTurn{State: "idle"}}}
+	now := time.Now()
+	return &apiControl{s: s, since: now, hasHistory: s.cfg.Resume || s.cfg.ForkFrom != "", pending: map[string]RuntimePendingRequest{}, questions: map[string]event.Question{}, watchers: map[*apiWatcher]struct{}{}, state: RuntimeState{Identity: RuntimeIdentity{ConversationID: s.cfg.SessionID, HostID: s.cfg.ID, HostIncarnation: hostID, Metadata: o}, Build: apiBuild(), Cwd: s.cfg.Cwd, Phase: "host_starting", PhaseSince: now, Settings: RuntimeSettings{Model: s.cfg.Model, Effort: s.cfg.Effort, Mode: apiMode(s.cfg.Kind, s.cfg.PermissionMode)}, Turn: RuntimeTurn{State: "idle"}}}
 }
 
 func (s *server) listenAPI() error {
@@ -133,8 +141,20 @@ func (s *server) serveAPI(c net.Conn) {
 	response := s.api.execute(ctx, r)
 	_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = WriteAPIResponse(c, response)
-	if r.Method == "stop" && response.OK {
+	if (r.Method == "stop" || r.Method == "delete") && response.OK {
 		s.stopOnce.Do(func() { close(s.quit) })
+	}
+}
+
+// fail puts the host in its failed phase, saying why, and retires the agent
+// so nothing half-started lingers: the owner reads the reason and decides
+// whether to initialize again. Called with mu held.
+func (a *apiControl) fail(code string) {
+	a.failure = APIError(code, "not_applied")
+	a.confirming = false
+	a.ready = false
+	if a.s.conn != nil {
+		a.s.retire(a.s.detach())
 	}
 }
 
@@ -200,17 +220,25 @@ func (a *apiControl) changed() {
 	}
 	a.state.Turn.State = state
 	a.state.SettingsConfirmed = a.ready
+	phase := "ready"
 	switch {
 	case a.stopped:
-		a.state.Phase = "stopped"
+		phase = "stopped"
+	case a.failure != nil:
+		phase = "failed"
 	case a.s.conn == nil && a.hadAgent:
-		a.state.Phase = "sleeping"
+		phase = "sleeping"
 	case a.s.conn == nil:
-		a.state.Phase = "host_starting"
+		phase = "host_starting"
 	case !a.ready:
-		a.state.Phase = "agent_starting"
-	default:
-		a.state.Phase = "ready"
+		phase = "agent_starting"
+	}
+	if phase != a.state.Phase {
+		a.since = time.Now()
+	}
+	a.state.Phase, a.state.PhaseSince, a.state.Failure, a.state.Deadline = phase, a.since, a.failure, time.Time{}
+	if phase == "agent_starting" {
+		a.state.Deadline = a.since.Add(apiReadyWithin)
 	}
 	b, _ := json.Marshal(a.state)
 	if len(b) <= APIOutputBytes {
@@ -384,10 +412,7 @@ func (a *apiControl) execute(ctx context.Context, r APIRequest) APIResponse {
 		if !apiMatches(a.state, lookup) {
 			return apiFailure(r, "conflict", "not_applied")
 		}
-		if a.failure != nil {
-			return APIResponse{Protocol: 1, RequestID: r.RequestID, Error: a.failure}
-		}
-		copy := a.state
+		copy := a.state // a failed host answers with its state, which says why
 		return apiSuccess(r, RuntimeInspection{Status: copy.Phase, State: &copy})
 	}
 	if r.Method == "receipt" {
@@ -417,6 +442,8 @@ func (a *apiControl) execute(ctx context.Context, r APIRequest) APIResponse {
 		return a.interrupt(ctx, r)
 	case "stop":
 		return a.stop(ctx, r)
+	case "delete":
+		return a.remove(ctx, r)
 	default:
 		return apiFailure(r, "unsupported", "not_applied")
 	}
@@ -445,18 +472,29 @@ func (a *apiControl) waitReady(ctx context.Context) bool {
 	}
 }
 
-// Confirmation outlives a timed-out CLI exchange. Each provider request has its
-// own deadline; no private prompt is sent while startup is being reconciled.
+// Confirmation outlives a timed-out CLI exchange, but not apiReadyWithin: by
+// then the host is ready or failed, with the operation's receipt to match.
+// No private prompt is sent while startup is being reconciled.
 func (a *apiControl) startConfirmation(operation, kind string) {
 	a.confirm(operation, kind, apiEngineSettings{a.s.cfg.Model, a.s.cfg.Effort, a.s.cfg.PermissionMode})
 }
 
 // startAgent starts the host's agent for initialize or prepare, which then
-// confirm it themselves. Called with the host mutex held.
-func (a *apiControl) startAgent() error {
+// confirm it themselves, or says definitely why it can't: the folder is
+// gone, or the agent can't be run. Nothing started, the host is failed with
+// that reason until the owner tries again. Called with the host mutex held.
+func (a *apiControl) startAgent() (code string, ok bool) {
+	if apiFolderMissing(a.s.cfg.Cwd) {
+		a.fail("folder_missing")
+		return "folder_missing", false
+	}
 	a.apiStarting = true
 	defer func() { a.apiStarting = false }()
-	return a.s.start()
+	if err := a.s.start(); err != nil {
+		a.fail("unsupported")
+		return "unsupported", false
+	}
+	return "", true
 }
 
 // confirm runs the execution handshake once per agent. An API operation that
@@ -474,7 +512,7 @@ func (a *apiControl) confirm(operation, kind string, settings apiEngineSettings)
 		InitializeExecution(context.Context, string, string, string) (event.Init, error)
 	})
 	if !ok {
-		a.failure = APIError("unsupported", "unknown")
+		a.reject(operation, kind, "unsupported")
 		return
 	}
 	a.confirming = true
@@ -484,7 +522,7 @@ func (a *apiControl) confirm(operation, kind string, settings apiEngineSettings)
 	a.failure = nil
 	model, effort, mode := settings.model, settings.effort, settings.mode
 	go func() {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), apiReadyWithin)
 		defer cancel()
 		done := make(chan struct{})
 		defer close(done)
@@ -499,31 +537,53 @@ func (a *apiControl) confirm(operation, kind string, settings apiEngineSettings)
 		a.s.mu.Lock()
 		defer a.s.mu.Unlock()
 		if a.s.conn != conn {
+			// Gone with no agent in its place, it exited before it was ready;
+			// another agent there is a later start's to confirm.
+			if a.s.conn == nil && !a.stopped && a.failure == nil {
+				operation, kind := a.confirmOperation, a.confirmKind
+				a.confirmOperation, a.confirmKind = "", ""
+				a.reject(operation, kind, "exited")
+				a.s.publish()
+			}
 			return
 		}
 		a.confirming = false
 		operation, kind := a.confirmOperation, a.confirmKind
 		a.confirmOperation, a.confirmKind = "", ""
 		if err != nil {
-			a.failure = APIError("unsupported", "unknown")
+			code := "unsupported" // the provider refused a setting
+			if errors.Is(err, context.DeadlineExceeded) {
+				code = "timeout"
+			}
+			a.reject(operation, kind, code)
 			a.s.publish()
 			return
 		}
 		a.handshakeConfirmed = true
 		a.s.onAgentEvent(conn, initialized)
 		if !a.ready {
-			a.failure = APIError("conflict", "unknown")
+			a.reject(operation, kind, "conflict")
 			a.s.publish()
 			return
 		}
 		a.confirmed = &settings
 		if operation != "" {
 			if err := a.finish(operation, kind, "confirmed", ""); err != nil {
-				a.failure = APIError("unknown", "unknown")
+				a.fail("permission") // the ledger couldn't be written: nothing can be proven of this host
 			}
 		}
 		a.s.publish()
 	}()
+}
+
+// reject fails the host for code and settles the operation that was waiting
+// on this agent, when one was: a handshake the host began itself has none.
+// Called with mu held.
+func (a *apiControl) reject(operation, kind, code string) {
+	a.fail(code)
+	if operation != "" {
+		_ = a.finish(operation, kind, "rejected", "")
+	}
 }
 
 func (a *apiControl) initialize(ctx context.Context, r APIRequest) APIResponse {
@@ -538,7 +598,8 @@ func (a *apiControl) initialize(ctx context.Context, r APIRequest) APIResponse {
 		return apiFailure(r, "conflict", "not_applied")
 	}
 	if request.Expected != nil {
-		if a.state.Identity.Matches(*request.Expected) != nil || a.s.conn != nil || a.state.Phase != "sleeping" {
+		// A sleeping host wakes; a failed one is tried again, its reason cleared.
+		if a.state.Identity.Matches(*request.Expected) != nil || a.s.conn != nil || a.state.Phase != "sleeping" && a.state.Phase != "failed" {
 			a.s.mu.Unlock()
 			return apiFailure(r, "stale", "not_applied")
 		}
@@ -555,9 +616,11 @@ func (a *apiControl) initialize(ctx context.Context, r APIRequest) APIResponse {
 		return apiFailure(r, "unknown", "unknown")
 	}
 	a.s.cfg.Model, a.s.cfg.Effort, a.s.cfg.PermissionMode = request.Settings.Model, request.Settings.Effort, apiEngineMode(a.s.cfg.Kind, request.Settings.Mode)
-	if err := a.startAgent(); err != nil {
+	if code, ok := a.startAgent(); !ok {
+		a.reject(request.OperationID, "initialize", code)
+		a.s.publish()
 		a.s.mu.Unlock()
-		return apiFailure(r, "unknown", "unknown")
+		return apiFailure(r, code, "not_applied")
 	}
 	a.startConfirmation(request.OperationID, "initialize")
 	a.s.publish()
@@ -617,9 +680,11 @@ func (a *apiControl) prepare(ctx context.Context, r APIRequest) APIResponse {
 			return apiFailure(r, "stale", "unknown")
 		}
 		a.s.cfg.Model, a.s.cfg.Effort, a.s.cfg.PermissionMode = request.Settings.Model, request.Settings.Effort, apiEngineMode(a.s.cfg.Kind, request.Settings.Mode)
-		if err := a.startAgent(); err != nil {
+		if code, ok := a.startAgent(); !ok {
+			a.reject(request.OperationID, "prepare", code)
+			a.s.publish()
 			a.s.mu.Unlock()
-			return apiFailure(r, "unknown", "unknown")
+			return apiFailure(r, code, "not_applied")
 		}
 		a.s.saveConfig()
 		a.s.publish()
@@ -628,6 +693,12 @@ func (a *apiControl) prepare(ctx context.Context, r APIRequest) APIResponse {
 	a.s.publish()
 	a.s.mu.Unlock()
 	if !a.waitReady(ctx) {
+		a.s.mu.Lock()
+		failure := a.failure
+		a.s.mu.Unlock()
+		if failure != nil {
+			return APIResponse{Protocol: 1, RequestID: r.RequestID, Error: failure}
+		}
 		return apiFailure(r, "unknown", "unknown")
 	}
 	a.s.mu.Lock()
@@ -965,6 +1036,46 @@ func (a *apiControl) completeStop(operation string, conn agent.Conn) (RuntimeRec
 	a.s.info.State = "stopped"
 	a.s.publish()
 	return receipt, "confirmed", nil
+}
+
+// remove is the live host's part of a delete: its agent stops and it says
+// so, then exits; the caller takes its folder once it has. Nothing is
+// ledgered, as the ledger goes with the folder. Named like inspect, not by
+// incarnation: a removal is of the conversation, whatever state it's in.
+func (a *apiControl) remove(ctx context.Context, r APIRequest) APIResponse {
+	var request RuntimeDeleteRequest
+	if json.Unmarshal(r.Params, &request) != nil || request.Validate() != nil {
+		return apiFailure(r, "invalid_input", "not_applied")
+	}
+	a.s.mu.Lock()
+	if !apiMatches(a.state, request.Expected) {
+		a.s.mu.Unlock()
+		return apiFailure(r, "conflict", "not_applied")
+	}
+	conn := a.s.conn
+	a.s.mu.Unlock()
+	if conn != nil {
+		gone := make(chan error, 1)
+		go func() { gone <- conn.Close() }()
+		select {
+		case err := <-gone:
+			if err != nil {
+				return apiFailure(r, "unknown", "unknown")
+			}
+		case <-ctx.Done():
+			return apiFailure(r, "unknown", "unknown")
+		}
+	}
+	a.s.mu.Lock()
+	defer a.s.mu.Unlock()
+	if a.s.conn != nil && a.s.conn != conn {
+		return apiFailure(r, "unknown", "unknown")
+	}
+	a.s.detach()
+	a.stopped = true
+	a.s.info.State = "stopped"
+	a.s.publish()
+	return apiSuccess(r, RuntimeReceipt{OperationID: request.OperationID, Identity: a.state.Identity, Kind: "delete", Outcome: "confirmed"})
 }
 
 // APIEvents subscribes without waking or starting an unrelated host.

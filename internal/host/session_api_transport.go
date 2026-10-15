@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,6 +43,8 @@ func APIError(code, outcome string) *RuntimeError {
 		"conflict": "Conversation ownership is conflicting.", "unknown": "Operation outcome is unconfirmed.",
 		"permission": "Runtime storage is inaccessible.", "unavailable": "Runtime host is unavailable.",
 		"cancelled": "Runtime observation was cancelled.", "overflow": "Runtime output exceeded its limit.",
+		"timeout": "Runtime agent did not become ready in time.", "exited": "Runtime agent exited before it was ready.",
+		"folder_missing": "Conversation folder no longer exists.",
 	}[code]
 	if message == "" {
 		message = "Runtime operation could not be verified."
@@ -53,7 +56,8 @@ func APIError(code, outcome string) *RuntimeError {
 	if code == "busy" || code == "unavailable" {
 		retry = "observe"
 	}
-	if code == "permission" || code == "unsupported" || code == "conflict" {
+	switch code {
+	case "permission", "unsupported", "conflict", "timeout", "exited", "folder_missing":
 		retry = "user"
 	}
 	return &RuntimeError{Code: code, Outcome: outcome, Retry: retry, Message: message}
@@ -97,7 +101,7 @@ func apiProbe() RuntimeCapabilities {
 			providers = append(providers, RuntimeProvider{Kind: string(a.Kind()), Features: p.SessionAPIFeatures()})
 		}
 	}
-	return RuntimeCapabilities{Protocol: 1, Build: apiBuild(), Features: []string{"initialize", "inspect", "list_owned", "prepare", "conditional_send", "receipts", "control_snapshot", "events", "structured_answers", "interrupt", "stop"}, Providers: providers}
+	return RuntimeCapabilities{Protocol: 1, Build: apiBuild(), Features: []string{"initialize", "inspect", "list_owned", "prepare", "conditional_send", "receipts", "control_snapshot", "events", "structured_answers", "interrupt", "stop", "failed_phase", "delete"}, Providers: providers}
 }
 
 func apiValidRequest(r APIRequest) bool {
@@ -113,6 +117,20 @@ func apiSuccess(r APIRequest, result any) APIResponse {
 }
 
 func apiSocket(id string) string { return filepath.Join(dir(id), "api.sock") }
+
+// apiHostID is whether id names one folder under Root() and nothing above
+// or beside it: the only kind of folder a removal may take.
+func apiHostID(id string) bool {
+	return runtimeToken(id, 128) && id != "." && id != ".." && !strings.ContainsAny(id, `/\`)
+}
+
+// apiFolderMissing is whether the folder an agent would start in is gone.
+// Starting there would fail with no word of why; refusing beforehand is
+// definite, and the owner knows what to do about its folder.
+func apiFolderMissing(cwd string) bool {
+	st, err := os.Stat(cwd)
+	return err != nil || !st.IsDir()
+}
 
 // APIExecute dispatches supported commands. It never trusts an unrelated live
 // process solely because a shortened ID or folder happens to match.
@@ -143,6 +161,12 @@ func APIExecute(ctx context.Context, r APIRequest) APIResponse {
 			return apiFailure(r, "invalid_input", "not_applied")
 		}
 		return apiReadReceipt(ctx, r, lookup)
+	case "delete":
+		var request RuntimeDeleteRequest
+		if json.Unmarshal(r.Params, &request) != nil || request.Validate() != nil {
+			return apiFailure(r, "invalid_input", "not_applied")
+		}
+		return apiDelete(ctx, r, request)
 	default:
 		var target struct {
 			Expected RuntimeIdentity `json:"expected"`
@@ -268,12 +292,60 @@ func apiInspect(ctx context.Context, r APIRequest, lookup RuntimeLookup) APIResp
 	}
 	if !Alive(info.HostPID) {
 		status := "missing"
-		if stored.Phase == "stopped" {
-			status = "stopped"
+		if stored.Phase == "stopped" || stored.Phase == "failed" {
+			status = stored.Phase // its last word stands: the owner reads why
 		}
 		return apiSuccess(r, RuntimeInspection{Status: status, State: &stored})
 	}
 	return apiCall(ctx, id, r)
+}
+
+// apiDelete removes an owned host: the live one is told to stop first, then
+// its folder and scratch go once its process has. A host already gone is
+// confirmed too, so a removal the caller lost the answer to can be repeated.
+// Only a public host that names this conversation and owner is ever taken.
+func apiDelete(ctx context.Context, r APIRequest, request RuntimeDeleteRequest) APIResponse {
+	id := request.Expected.HostID
+	if id == "" {
+		id = ShortID(request.Expected.ConversationID)
+	}
+	if !apiHostID(id) {
+		return apiFailure(r, "invalid_input", "not_applied")
+	}
+	identity := RuntimeIdentity{ConversationID: request.Expected.ConversationID, HostID: id, Metadata: request.Expected.Metadata}
+	receipt := RuntimeReceipt{OperationID: request.OperationID, Identity: identity, Kind: "delete", Outcome: "confirmed"}
+	cfg, err := ReadConfig(id)
+	if os.IsNotExist(err) {
+		return apiSuccess(r, receipt) // nothing of this conversation's to take
+	}
+	if err != nil {
+		return apiFailure(r, "unavailable", "not_applied")
+	}
+	if cfg.ID != id || cfg.SessionID != request.Expected.ConversationID || !apiMetadataMatches(cfg.Meta, request.Expected.Metadata) || !cfg.PublicAPI {
+		return apiFailure(r, "conflict", "not_applied")
+	}
+	if state, err := apiReadState(id); err == nil && apiMatches(state, request.Expected) {
+		receipt.Identity.HostIncarnation = state.Identity.HostIncarnation
+	}
+	if info, err := ReadInfo(id); err == nil && Alive(info.HostPID) {
+		if response := apiCall(ctx, id, r); !response.OK {
+			return response
+		}
+		for Alive(info.HostPID) {
+			select {
+			case <-ctx.Done():
+				return apiFailure(r, "unknown", "unknown") // stopped, its folder still here
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	if tmp := TempDir(id); IsTempDir(tmp) {
+		_ = os.RemoveAll(tmp)
+	}
+	if err := os.RemoveAll(dir(id)); err != nil {
+		return apiFailure(r, "permission", "unknown")
+	}
+	return apiSuccess(r, receipt)
 }
 
 func apiInitialize(ctx context.Context, r APIRequest) APIResponse {
@@ -316,6 +388,9 @@ func apiInitialize(ctx context.Context, r APIRequest) APIResponse {
 	provider, ok := agent.As[agent.SessionAPIProvider](agent.Kind(request.Provider))
 	if !ok {
 		return apiFailure(r, "unsupported", "not_applied")
+	}
+	if apiFolderMissing(cwd) {
+		return apiFailure(r, "folder_missing", "not_applied")
 	}
 	cfg := Config{ID: id, SessionID: request.ConversationID, Cwd: cwd, Kind: request.Provider, Resume: request.Resume, ForkFrom: request.ForkFrom, Name: "External conversation", Binary: request.EngineBinary, Model: request.Settings.Model, Effort: request.Settings.Effort, PermissionMode: provider.SessionAPIEngineMode(request.Settings.Mode), PublicAPI: true,
 		Account: provider.SessionAPIProfile(), Meta: apiMetadata(request.Metadata)}

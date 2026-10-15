@@ -474,3 +474,93 @@ func TestPublicExecutableSendsImagesAndRefusesBadFiles(t *testing.T) {
 		t.Fatalf("provider content = %+v\nwant %+v", logged.Text, want)
 	}
 }
+
+// A delete takes the whole host: its agent, its process, its folder and its
+// scratch. Inspecting afterwards finds nothing, and a repeat is confirmed
+// again, so a daemon that lost the first answer can simply ask once more.
+func TestPublicExecutableDeletesAHostForGood(t *testing.T) {
+	h := newPublicAPIHarness(t)
+	state := h.initialize(t, "doomed")
+	id := state.Identity.HostID
+	info, err := host.ReadInfo(id)
+	if err != nil || !host.Alive(info.HostPID) {
+		t.Fatalf("no live host: %+v %v", info, err)
+	}
+	lookup := host.RuntimeLookup{ConversationID: state.Identity.ConversationID, HostID: id, Metadata: state.Identity.Metadata}
+	operation, _ := host.NewSessionID()
+	var receipt host.RuntimeReceipt
+	if response := h.call(t, "delete", host.RuntimeDeleteRequest{OperationID: operation, Expected: lookup}, &receipt); !response.OK ||
+		receipt.Validate(state.Identity, operation, "delete") != nil || receipt.Outcome != "confirmed" || receipt.Identity.HostIncarnation != state.Identity.HostIncarnation {
+		t.Fatalf("delete: %+v %+v", response, receipt)
+	}
+	if host.Alive(info.HostPID) {
+		t.Fatal("the host outlived its delete")
+	}
+	if _, err := os.Stat(filepath.Join(host.Root(), id)); !os.IsNotExist(err) {
+		t.Fatalf("host folder remains: %v", err)
+	}
+	var inspection host.RuntimeInspection
+	if response := h.call(t, "inspect", lookup, &inspection); !response.OK || inspection.Status != "missing" || inspection.State != nil {
+		t.Fatalf("a deleted host was found: %+v %+v", response, inspection)
+	}
+	again, _ := host.NewSessionID()
+	if response := h.call(t, "delete", host.RuntimeDeleteRequest{OperationID: again, Expected: lookup}, &receipt); !response.OK || receipt.Outcome != "confirmed" {
+		t.Fatalf("repeated delete: %+v", response)
+	}
+	// Another owner's conversation in a folder of the same name is never taken.
+	other := h.initialize(t, "kept")
+	stranger := host.RuntimeLookup{ConversationID: other.Identity.ConversationID, HostID: other.Identity.HostID, Metadata: state.Identity.Metadata}
+	operation, _ = host.NewSessionID()
+	if response := h.call(t, "delete", host.RuntimeDeleteRequest{OperationID: operation, Expected: stranger}, nil); response.OK || response.Error == nil || response.Error.Code != "conflict" {
+		t.Fatalf("another owner's host was deleted: %+v", response)
+	}
+	if _, err := os.Stat(filepath.Join(host.Root(), other.Identity.HostID)); err != nil {
+		t.Fatal("the other host's folder went with it")
+	}
+}
+
+// A conversation whose folder is gone is refused before anything starts, and
+// a host whose folder went while it ran fails with that reason the next time
+// it would start its agent. The folder back, the same host is tried again.
+func TestPublicExecutableFailsOnAMissingFolder(t *testing.T) {
+	h := newPublicAPIHarness(t)
+	nowhere := h.request("nowhere")
+	nowhere.Cwd = filepath.Join(h.dir, "never-made")
+	if response := h.call(t, "initialize", nowhere, nil); response.OK || response.Error == nil || response.Error.Code != "folder_missing" || response.Error.Outcome != "not_applied" {
+		t.Fatalf("started in a missing folder: %+v", response)
+	}
+
+	state := h.initialize(t, "uprooted")
+	if err := os.RemoveAll(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	changed := state.Settings
+	changed.Effort = "high"
+	operation, _ := host.NewSessionID()
+	if response := h.call(t, "prepare", host.RuntimePrepareRequest{OperationID: operation, Expected: state.Identity, Settings: changed}, nil); response.OK || response.Error == nil || response.Error.Code != "folder_missing" || response.Error.Outcome != "not_applied" {
+		t.Fatalf("prepared in a missing folder: %+v", response)
+	}
+	var inspection host.RuntimeInspection
+	lookup := host.RuntimeLookup{ConversationID: state.Identity.ConversationID, HostID: state.Identity.HostID, Metadata: state.Identity.Metadata}
+	if response := h.call(t, "inspect", lookup, &inspection); !response.OK || inspection.Status != "failed" || inspection.State == nil ||
+		inspection.State.Phase != "failed" || inspection.State.Failure == nil || inspection.State.Failure.Code != "folder_missing" || inspection.State.PhaseSince.IsZero() {
+		t.Fatalf("a host with no folder isn't failed: %+v %+v", response, inspection.State)
+	}
+	var receipt host.RuntimeReceipt
+	if response := h.call(t, "receipt", host.RuntimeReceiptLookup{OperationID: operation, Expected: lookup}, &receipt); !response.OK || receipt.Outcome != "rejected" {
+		t.Fatalf("a refused prepare's receipt: %+v %+v", response, receipt)
+	}
+
+	if err := os.MkdirAll(h.dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	wake := h.request("uprooted")
+	wake.ConversationID, wake.Metadata = state.Identity.ConversationID, state.Identity.Metadata
+	expected := state.Identity
+	expected.AgentIncarnation = ""
+	wake.Expected = &expected
+	var woken host.RuntimeState
+	if response := h.call(t, "initialize", wake, &woken); !response.OK || woken.Phase != "ready" || woken.Failure != nil || woken.Identity.HostIncarnation != state.Identity.HostIncarnation {
+		t.Fatalf("a failed host wasn't tried again: %+v %+v", response, woken)
+	}
+}
