@@ -49,6 +49,8 @@ for line in sys.stdin:
             emit({'type':'control_request','request_id':'request-1','request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','tool_use_id':'call-1','input':{'questions':[{'question':'Choose','header':'Choice','options':[{'label':'A','description':'First'},{'label':'B','description':'Second'}],'multiSelect':False}]}}})
         elif text=='approval':
             emit({'type':'control_request','request_id':'request-1','request':{'subtype':'can_use_tool','tool_name':'Bash','tool_use_id':'call-1','input':{'command':'synthetic'}}})
+        elif text=='edit':
+            emit({'type':'control_request','request_id':'request-1','request':{'subtype':'can_use_tool','tool_name':'Edit','tool_use_id':'call-1','input':{'file_path':'/w/a.txt','old_string':'a','new_string':'b'}}})
         else: emit({'type':'result','subtype':'success','result':'done'})
     elif v.get('type')=='control_response':
         log({'answer':v['response']})
@@ -158,6 +160,50 @@ func (h publicAPIHarness) inspect(t *testing.T, id host.RuntimeIdentity) host.Ru
 	return *inspection.State
 }
 
+// pending is the one request the host's agent is waiting on an answer to.
+func (h publicAPIHarness) pending(t *testing.T, id host.RuntimeIdentity) host.RuntimePendingRequest {
+	t.Helper()
+	requestID, _ := host.NewSessionID()
+	body, _ := json.Marshal(map[string]any{"protocol": 1, "requestId": requestID, "method": "subscribe", "params": host.RuntimeSubscribeRequest{Expected: id}})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	watch := exec.CommandContext(ctx, h.binary, "session", "events", "--protocol", "1")
+	watch.Stdin = bytes.NewReader(body)
+	out, err := watch.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = watch.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); watch.Wait() })
+	reader := bufio.NewReader(out)
+	var snapshot host.RuntimeEvent
+	line, err := reader.ReadBytes('\n')
+	if err != nil || json.Unmarshal(line, &snapshot) != nil || snapshot.Type != "snapshot" || snapshot.Snapshot == nil {
+		t.Fatalf("missing snapshot: %s %v", line, err)
+	}
+	if err = snapshot.Snapshot.Validate(id); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); len(snapshot.Snapshot.Pending) == 0 && time.Now().Before(deadline); {
+		line, err = reader.ReadBytes('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		var update host.RuntimeEvent
+		if json.Unmarshal(line, &update) != nil {
+			t.Fatal("invalid event")
+		}
+		if update.Type == "request" {
+			snapshot.Snapshot.Pending = append(snapshot.Snapshot.Pending, *update.Request)
+		}
+	}
+	if len(snapshot.Snapshot.Pending) != 1 {
+		t.Fatalf("incomplete requests: %+v", snapshot)
+	}
+	return snapshot.Snapshot.Pending[0]
+}
+
 func TestPublicExecutableIsolatesChatsAndDeduplicatesDelivery(t *testing.T) {
 	h := newPublicAPIHarness(t)
 	a := h.initialize(t, "chat-a")
@@ -210,46 +256,7 @@ func TestPublicExecutableSnapshotsAndNativeQuestions(t *testing.T) {
 	if response := h.call(t, "send", host.RuntimeSendRequest{OperationID: operation, Expected: state.Identity, RequireTurnState: "idle", Settings: state.Settings, Text: "question"}, &receipt); !response.OK {
 		t.Fatalf("send: %+v", response)
 	}
-	requestID, _ := host.NewSessionID()
-	body, _ := json.Marshal(map[string]any{"protocol": 1, "requestId": requestID, "method": "subscribe", "params": host.RuntimeSubscribeRequest{Expected: state.Identity}})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	watch := exec.CommandContext(ctx, h.binary, "session", "events", "--protocol", "1")
-	watch.Stdin = bytes.NewReader(body)
-	out, err := watch.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = watch.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { cancel(); watch.Wait() }()
-	reader := bufio.NewReader(out)
-	var snapshot host.RuntimeEvent
-	line, err := reader.ReadBytes('\n')
-	if err != nil || json.Unmarshal(line, &snapshot) != nil || snapshot.Type != "snapshot" || snapshot.Snapshot == nil {
-		t.Fatalf("missing snapshot: %s %v", line, err)
-	}
-	if err = snapshot.Snapshot.Validate(state.Identity); err != nil {
-		t.Fatal(err)
-	}
-	for deadline := time.Now().Add(5 * time.Second); len(snapshot.Snapshot.Pending) == 0 && time.Now().Before(deadline); {
-		line, err = reader.ReadBytes('\n')
-		if err != nil {
-			t.Fatal(err)
-		}
-		var update host.RuntimeEvent
-		if json.Unmarshal(line, &update) != nil {
-			t.Fatal("invalid event")
-		}
-		if update.Type == "request" {
-			snapshot.Snapshot.Pending = append(snapshot.Snapshot.Pending, *update.Request)
-		}
-	}
-	if len(snapshot.Snapshot.Pending) != 1 {
-		t.Fatalf("incomplete requests: %+v", snapshot)
-	}
-	pending := snapshot.Snapshot.Pending[0]
+	pending := h.pending(t, state.Identity)
 	answerID, _ := host.NewSessionID()
 	answer := host.RuntimeAnswerRequest{OperationID: answerID, Expected: state.Identity, Request: host.RuntimeRequestIdentity{ID: pending.ID, AgentIncarnation: pending.AgentIncarnation}, Decision: "allow", Answers: map[string]string{pending.Questions[0].ID: "A"}}
 	if response := h.call(t, "answer", answer, &receipt); !response.OK || receipt.RequestID != pending.ID || receipt.Outcome != "confirmed" {
@@ -269,6 +276,46 @@ func TestPublicExecutableSnapshotsAndNativeQuestions(t *testing.T) {
 	answer.OperationID, _ = host.NewSessionID()
 	if response := h.call(t, "answer", answer, nil); response.OK || response.Error == nil || response.Error.Code != "stale" {
 		t.Fatalf("old agent answer accepted: %+v", response)
+	}
+}
+
+// Allowing a tool call once runs it as the agent asked: the provider gets
+// the call's own input back, in the agent's own field names.
+func TestPublicExecutableAllowOnceKeepsTheCallInput(t *testing.T) {
+	h := newPublicAPIHarness(t)
+	state := h.initialize(t, "approvals")
+	operation, _ := host.NewSessionID()
+	if response := h.call(t, "send", host.RuntimeSendRequest{OperationID: operation, Expected: state.Identity, RequireTurnState: "idle", Settings: state.Settings, Text: "edit"}, nil); !response.OK {
+		t.Fatalf("send: %+v", response)
+	}
+	pending := h.pending(t, state.Identity)
+	want := map[string]any{"file_path": "/w/a.txt", "old_string": "a", "new_string": "b"}
+	var shown map[string]any
+	if json.Unmarshal(pending.Input, &shown) != nil || !reflect.DeepEqual(shown, want) {
+		t.Fatalf("pending input is not the call's own: %s", pending.Input)
+	}
+	answerID, _ := host.NewSessionID()
+	var receipt host.RuntimeReceipt
+	answer := host.RuntimeAnswerRequest{OperationID: answerID, Expected: state.Identity, Request: host.RuntimeRequestIdentity{ID: pending.ID, AgentIncarnation: pending.AgentIncarnation}, Decision: "allow"}
+	if response := h.call(t, "answer", answer, &receipt); !response.OK || receipt.Outcome != "confirmed" {
+		t.Fatalf("answer: %+v %+v", response, receipt)
+	}
+	data, _ := os.ReadFile(h.log)
+	var logged struct {
+		Answer struct {
+			Response struct {
+				Behavior     string         `json:"behavior"`
+				UpdatedInput map[string]any `json:"updatedInput"`
+			} `json:"response"`
+		} `json:"answer"`
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		if strings.Contains(line, `"answer"`) {
+			json.Unmarshal([]byte(line), &logged)
+		}
+	}
+	if logged.Answer.Response.Behavior != "allow" || !reflect.DeepEqual(logged.Answer.Response.UpdatedInput, want) {
+		t.Fatalf("allowed call did not keep its input: %s", data)
 	}
 }
 
@@ -425,5 +472,95 @@ func TestPublicExecutableSendsImagesAndRefusesBadFiles(t *testing.T) {
 	}
 	if !reflect.DeepEqual(logged.Text, want) {
 		t.Fatalf("provider content = %+v\nwant %+v", logged.Text, want)
+	}
+}
+
+// A delete takes the whole host: its agent, its process, its folder and its
+// scratch. Inspecting afterwards finds nothing, and a repeat is confirmed
+// again, so a daemon that lost the first answer can simply ask once more.
+func TestPublicExecutableDeletesAHostForGood(t *testing.T) {
+	h := newPublicAPIHarness(t)
+	state := h.initialize(t, "doomed")
+	id := state.Identity.HostID
+	info, err := host.ReadInfo(id)
+	if err != nil || !host.Alive(info.HostPID) {
+		t.Fatalf("no live host: %+v %v", info, err)
+	}
+	lookup := host.RuntimeLookup{ConversationID: state.Identity.ConversationID, HostID: id, Metadata: state.Identity.Metadata}
+	operation, _ := host.NewSessionID()
+	var receipt host.RuntimeReceipt
+	if response := h.call(t, "delete", host.RuntimeDeleteRequest{OperationID: operation, Expected: lookup}, &receipt); !response.OK ||
+		receipt.Validate(state.Identity, operation, "delete") != nil || receipt.Outcome != "confirmed" || receipt.Identity.HostIncarnation != state.Identity.HostIncarnation {
+		t.Fatalf("delete: %+v %+v", response, receipt)
+	}
+	if host.Alive(info.HostPID) {
+		t.Fatal("the host outlived its delete")
+	}
+	if _, err := os.Stat(filepath.Join(host.Root(), id)); !os.IsNotExist(err) {
+		t.Fatalf("host folder remains: %v", err)
+	}
+	var inspection host.RuntimeInspection
+	if response := h.call(t, "inspect", lookup, &inspection); !response.OK || inspection.Status != "missing" || inspection.State != nil {
+		t.Fatalf("a deleted host was found: %+v %+v", response, inspection)
+	}
+	again, _ := host.NewSessionID()
+	if response := h.call(t, "delete", host.RuntimeDeleteRequest{OperationID: again, Expected: lookup}, &receipt); !response.OK || receipt.Outcome != "confirmed" {
+		t.Fatalf("repeated delete: %+v", response)
+	}
+	// Another owner's conversation in a folder of the same name is never taken.
+	other := h.initialize(t, "kept")
+	stranger := host.RuntimeLookup{ConversationID: other.Identity.ConversationID, HostID: other.Identity.HostID, Metadata: state.Identity.Metadata}
+	operation, _ = host.NewSessionID()
+	if response := h.call(t, "delete", host.RuntimeDeleteRequest{OperationID: operation, Expected: stranger}, nil); response.OK || response.Error == nil || response.Error.Code != "conflict" {
+		t.Fatalf("another owner's host was deleted: %+v", response)
+	}
+	if _, err := os.Stat(filepath.Join(host.Root(), other.Identity.HostID)); err != nil {
+		t.Fatal("the other host's folder went with it")
+	}
+}
+
+// A conversation whose folder is gone is refused before anything starts, and
+// a host whose folder went while it ran fails with that reason the next time
+// it would start its agent. The folder back, the same host is tried again.
+func TestPublicExecutableFailsOnAMissingFolder(t *testing.T) {
+	h := newPublicAPIHarness(t)
+	nowhere := h.request("nowhere")
+	nowhere.Cwd = filepath.Join(h.dir, "never-made")
+	if response := h.call(t, "initialize", nowhere, nil); response.OK || response.Error == nil || response.Error.Code != "folder_missing" || response.Error.Outcome != "not_applied" {
+		t.Fatalf("started in a missing folder: %+v", response)
+	}
+
+	state := h.initialize(t, "uprooted")
+	if err := os.RemoveAll(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	changed := state.Settings
+	changed.Effort = "high"
+	operation, _ := host.NewSessionID()
+	if response := h.call(t, "prepare", host.RuntimePrepareRequest{OperationID: operation, Expected: state.Identity, Settings: changed}, nil); response.OK || response.Error == nil || response.Error.Code != "folder_missing" || response.Error.Outcome != "not_applied" {
+		t.Fatalf("prepared in a missing folder: %+v", response)
+	}
+	var inspection host.RuntimeInspection
+	lookup := host.RuntimeLookup{ConversationID: state.Identity.ConversationID, HostID: state.Identity.HostID, Metadata: state.Identity.Metadata}
+	if response := h.call(t, "inspect", lookup, &inspection); !response.OK || inspection.Status != "failed" || inspection.State == nil ||
+		inspection.State.Phase != "failed" || inspection.State.Failure == nil || inspection.State.Failure.Code != "folder_missing" || inspection.State.PhaseSince.IsZero() {
+		t.Fatalf("a host with no folder isn't failed: %+v %+v", response, inspection.State)
+	}
+	var receipt host.RuntimeReceipt
+	if response := h.call(t, "receipt", host.RuntimeReceiptLookup{OperationID: operation, Expected: lookup}, &receipt); !response.OK || receipt.Outcome != "rejected" {
+		t.Fatalf("a refused prepare's receipt: %+v %+v", response, receipt)
+	}
+
+	if err := os.MkdirAll(h.dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	wake := h.request("uprooted")
+	wake.ConversationID, wake.Metadata = state.Identity.ConversationID, state.Identity.Metadata
+	expected := state.Identity
+	expected.AgentIncarnation = ""
+	wake.Expected = &expected
+	var woken host.RuntimeState
+	if response := h.call(t, "initialize", wake, &woken); !response.OK || woken.Phase != "ready" || woken.Failure != nil || woken.Identity.HostIncarnation != state.Identity.HostIncarnation {
+		t.Fatalf("a failed host wasn't tried again: %+v %+v", response, woken)
 	}
 }
