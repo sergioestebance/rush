@@ -586,6 +586,11 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			// ponytail: polls the info file each second while the host is down; fswait if that costs
 			_ = send("reset", nil)
 			_ = send("info", info)
+			if list := host.ReadCommands(id); list != nil {
+				if b, err := event.Marshal(event.Commands{List: list}); err == nil {
+					emit(b)
+				}
+			}
 			sendHistory(info, time.Time{}, full, emit)
 			shown = info.UpdatedAt
 			if shown.IsZero() {
@@ -672,6 +677,12 @@ func wireLine(l []byte) []byte {
 		t, e = "sent", v
 	case host.Stamp:
 		t, e = "stamp", v
+	case host.Commands:
+		b, err := event.Marshal(event.Commands{List: v.Commands})
+		if err != nil {
+			return nil
+		}
+		return b
 	default:
 		return nil
 	}

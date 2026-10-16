@@ -365,11 +365,8 @@ func (s *server) onAgentEvent(conn agent.Conn, ev event.Event) {
 			return
 		}
 	case event.Commands:
-		list := make([]wireCommand, len(e.List))
-		for i, c := range e.List {
-			list[i] = wireCommand(c)
-		}
-		s.commands, _ = jsonx.Marshal(map[string]any{"type": typeCommands, "commands": list})
+		s.commands = commandsLine(e.List)
+		_ = WriteCommands(s.cfg.ID, e.List)
 		for c := range s.clients {
 			c.push(s.commands)
 		}
