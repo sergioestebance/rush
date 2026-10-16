@@ -179,6 +179,10 @@ type conn struct {
 	asks  map[string]headless.PermissionRequest // approvals and questions not yet answered
 	waits map[string]chan headless.ControlReply // control requests out, by id
 	live  claude.Usage                          // the last usage reading passed on
+	// commands are the session's slash commands as Claude Code last
+	// listed them, and terminal the ones only its terminal does.
+	commands []headless.Command
+	terminal map[string]bool
 }
 
 // tool is the server a tool of Claude Code's name is one of rush's, and
@@ -292,15 +296,16 @@ func (c *conn) own(ev headless.Event) bool {
 				c.events <- event.Init{SessionID: c.carried}
 				c.carried = ""
 			}
-			var cmds event.Commands
-			for _, k := range headless.Commands(e) {
-				cmds.List = append(cmds.List, event.Command(k))
-			}
-			c.events <- cmds
+			c.listCommands(headless.Commands(e))
 		}
 		if e.ID == c.initID && c.initDone != nil {
 			c.initOnce.Do(func() { c.initError = e.Error; close(c.initDone) })
 		}
+		return true
+	case headless.Init:
+		c.terminalOnly(e.TerminalCommands)
+	case headless.CommandsChanged:
+		c.listCommands(e.Commands)
 		return true
 	case headless.RateLimit:
 		c.shareUsage(e)

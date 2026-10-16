@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	claudeagent "github.com/0xdeafcafe/rush/internal/adapters/claude"
 	"github.com/0xdeafcafe/rush/internal/agent"
 	"github.com/0xdeafcafe/rush/internal/agent/event"
 	"github.com/0xdeafcafe/rush/internal/convo"
@@ -523,20 +524,9 @@ var claudeCloudPicks = func() []event.Command {
 	return out
 }()
 
-// offCommands are Claude Code's that do nothing in rush, and why: its own
-// terminal's, the odds and ends, and the ones rush hasn't done yet. They
+// offCommands are Claude Code's that do nothing in rush, and why. They
 // stay out of the picker, and say so when typed.
-var offCommands = func() map[string]string {
-	out := map[string]string{}
-	for _, n := range strings.Fields("theme color tui scroll-speed focus brief terminal-setup voice keybindings ide chrome exit quit vim") {
-		out[n] = "it's for Claude Code's own terminal"
-	}
-	for _, n := range strings.Fields("release-notes feedback bug share update install import powerup wellbeing breaks break-reminder downtime stickers radio heapdump passes agents plugin-types workflow-launch-exec") {
-		out[n] = "rush leaves it out"
-	}
-	out["loops"] = "Claude Code has it switched off; ask Claude to /loop instead"
-	return out
-}()
+var offCommands = claudeagent.OffCommands
 
 // openableScreens are the screens the session's agent can open.
 func openableScreens(c *hostConn) []event.Command {
