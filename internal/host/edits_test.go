@@ -89,4 +89,12 @@ func TestNameOp(t *testing.T) {
 		s.info.Name != "release notes" || s.cfg.NameFirst {
 		t.Fatalf("name: cfg %q, info %q, first %v (%v)", s.cfg.Name, s.info.Name, s.cfg.NameFirst, err)
 	}
+	s.cfg.Prompt, s.cfg.Cwd = "fix the flaky login test", "/w/app"
+	if err := s.do(op{Op: "name", Text: " "}); err != nil || s.info.Name != "fix the flaky login test" {
+		t.Fatalf("cleared: %q (%v)", s.info.Name, err)
+	}
+	s.cfg.Prompt = ""
+	if err := s.do(op{Op: "name"}); err != nil || s.info.Name != "fresh session in app" {
+		t.Fatalf("cleared without a first message: %q (%v)", s.info.Name, err)
+	}
 }

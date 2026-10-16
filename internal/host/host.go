@@ -1927,7 +1927,11 @@ func (s *server) do(o op) error {
 		return nil
 	case "name":
 		// Named by its owner: no first message or model title replaces it.
+		// An empty name goes back to the one its first message gave it.
 		n := strings.TrimSpace(o.Text)
+		if n == "" {
+			n = cmp.Or(NameFrom(s.cfg.Prompt), FreshName(s.cfg.Cwd))
+		}
 		s.cfg.Name, s.cfg.NameFirst, s.info.Name = n, false, n
 		s.saveConfig()
 		s.publish()
