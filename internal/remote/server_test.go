@@ -214,6 +214,7 @@ func TestWebControlsReachTheHost(t *testing.T) {
 		{"continue at the limit's reset", `{"op":"limit","now":true}`, map[string]any{"op": "limit", "now": true}},
 		{"tell a subagent", `{"op":"tell","id":"sub1","text":"hurry"}`, map[string]any{"op": "tell", "id": "sub1", "text": "hurry"}},
 		{"back", `{"op":"away"}`, map[string]any{"op": "away", "away": nil}},
+		{"rename", `{"op":"name","text":"release notes"}`, map[string]any{"op": "name", "text": "release notes"}},
 	} {
 		if w := post("/api/sessions/feedbeef/op", c.body); w.Code != http.StatusAccepted {
 			t.Fatalf("%s: %d %s", c.name, w.Code, w.Body)

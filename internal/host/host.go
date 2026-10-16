@@ -1925,6 +1925,14 @@ func (s *server) do(o op) error {
 		}
 		s.mu.Unlock()
 		return nil
+	case "name":
+		// Named by its owner: no first message or model title replaces it.
+		n := strings.TrimSpace(o.Text)
+		s.cfg.Name, s.cfg.NameFirst, s.info.Name = n, false, n
+		s.saveConfig()
+		s.publish()
+		s.mu.Unlock()
+		return nil
 	case "retitle":
 		// Moved to another folder (o.Text), its name may be the old one's.
 		s.retitle(s.cfg.Name, fmt.Sprintf("%s\n\n(It now works in %s, the %s project.)",

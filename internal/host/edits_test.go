@@ -78,3 +78,15 @@ func TestCdOp(t *testing.T) {
 		t.Fatalf("cd: cwd %q, info %q, edited %v (%v)", s.cfg.Cwd, s.info.Cwd, s.edited, err)
 	}
 }
+
+func TestNameOp(t *testing.T) {
+	setup(t)
+	s := &server{cfg: Config{ID: "nameop", Name: "fresh", NameFirst: true}, clients: map[*conn]struct{}{}}
+	if err := os.MkdirAll(dir(s.cfg.ID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.do(op{Op: "name", Text: "  release notes "}); err != nil || s.cfg.Name != "release notes" ||
+		s.info.Name != "release notes" || s.cfg.NameFirst {
+		t.Fatalf("name: cfg %q, info %q, first %v (%v)", s.cfg.Name, s.info.Name, s.cfg.NameFirst, err)
+	}
+}
