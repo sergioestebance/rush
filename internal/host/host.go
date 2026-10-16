@@ -488,6 +488,7 @@ func Run(id string) error {
 		s.restoreQueue(old)
 		cfg = s.cfg
 	}
+	s.loadCommands()
 	s.publish()
 	if !cfg.Resume && !cfg.Fork && cfg.Name != "" && cfg.Name == NameFrom(cfg.Prompt) {
 		s.mu.Lock()

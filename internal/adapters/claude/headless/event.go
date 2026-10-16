@@ -30,7 +30,14 @@ type Init struct {
 	// APIKeySource is where its API key comes from: "none" when it runs on
 	// a Claude sign-in instead.
 	APIKeySource string
+	// TerminalCommands are the slash commands only Claude Code's own
+	// terminal can do; a CLI from before them names none.
+	TerminalCommands []string
 }
+
+// CommandsChanged is the whole slash command list again, after it changed
+// mid-session.
+type CommandsChanged struct{ Commands []Command }
 
 // MCPServer is one MCP server as Claude Code last saw it: connected,
 // failed, needs-auth, pending.
@@ -252,6 +259,7 @@ func (TaskUpdated) event()         {}
 func (TaskProgress) event()        {}
 func (TaskDone) event()            {}
 func (BackgroundTasks) event()     {}
+func (CommandsChanged) event()     {}
 func (Other) event()               {}
 
 type envelope struct {
@@ -352,11 +360,22 @@ func decodeSystem(subtype string, line []byte, other Other) (Event, error) {
 			SlashCommands  []string    `json:"slash_commands"`
 			MCPServers     []MCPServer `json:"mcp_servers"`
 			APIKeySource   string      `json:"apiKeySource"`
+			Terminal       []string    `json:"terminal_slash_commands"`
 		}
 		if err := jsonx.Unmarshal(line, &r); err != nil {
 			return nil, err
 		}
-		return Init(r), nil
+		return Init{Effort: r.Effort, SessionID: r.SessionID, Model: r.Model, Cwd: r.Cwd, PermissionMode: r.PermissionMode,
+			Version: r.Version, Tools: r.Tools, SlashCommands: r.SlashCommands, MCPServers: r.MCPServers,
+			APIKeySource: r.APIKeySource, TerminalCommands: r.Terminal}, nil
+	case "commands_changed":
+		var r struct {
+			Commands []Command `json:"commands"`
+		}
+		if err := jsonx.Unmarshal(line, &r); err != nil {
+			return nil, err
+		}
+		return CommandsChanged(r), nil
 	case "status":
 		var r struct {
 			Status string `json:"status"`
