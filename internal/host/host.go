@@ -2175,7 +2175,7 @@ func (s *server) serve(nc net.Conn) {
 	// adds it, so every line after it comes live: none missed, none twice.
 	s.mu.Lock()
 	v := view{ring: slices.Clone(s.ring), seq: slices.Clone(s.seq), gone: s.gone, last: s.line,
-		inc: s.incarnation(), from: s.info.ReplayFrom}
+		inc: s.incarnation(), from: s.historyFrom()}
 	commands, context := s.commands, s.context
 	info, _ := jsonx.Marshal(map[string]any{"type": typeInfo, "info": s.info})
 	s.clients[c] = struct{}{}
@@ -2206,9 +2206,10 @@ func (s *server) serve(nc net.Conn) {
 		}
 		fail := func() { c.close() }
 		resumed := false
+		var tailFrom time.Time
 		if numbered {
 			var err error
-			if at, resumed, err = v.catchUp(w, enc, hi.after); err != nil {
+			if at, resumed, tailFrom, err = v.catchUp(w, enc, hi.after); err != nil {
 				fail()
 				return
 			}
@@ -2232,6 +2233,9 @@ func (s *server) serve(nc net.Conn) {
 				fail()
 				return
 			}
+		}
+		if numbered {
+			archived = tailExchanges(archived, resumed, tailFrom)
 		}
 		if !resumed {
 			// A resume has had them: they're the exchanges before it.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/0xdeafcafe/photon/jsonx"
+	"github.com/0xdeafcafe/rush/internal/agent/event"
 )
 
 // A viewer that says resume in its hello gets each ring line's frames
@@ -77,26 +78,42 @@ type view struct {
 	gone int // the last line trimmed
 	last int // the last line given a number
 	inc  string
-	from time.Time // the ring's ReplayFrom
+	from time.Time // what's before it is in the transcript: see historyFrom
+}
+
+// historyFrom is when what the transcript holds and the ring doesn't ends:
+// the latest of the host's start, a rewind and the ring's trim, once the
+// conversation has a transcript (began). Called with mu held.
+func (s *server) historyFrom() time.Time {
+	from := s.info.ReplayFrom
+	if s.began || s.cfg.Resume {
+		for _, t := range []time.Time{s.info.StartedAt, s.info.RewoundAt} {
+			if t.After(from) {
+				from = t
+			}
+		}
+	}
+	return from
 }
 
 // catchUp writes what a resuming viewer is owed of the ring through enc:
 // the frames after the position after, when they can be resumed, or else
 // a reset and the tail. It reports the last numbered frame it sent (the
-// position resumed from when it sent none) and whether it resumed.
-func (v *view) catchUp(w io.Writer, enc *encoder, after string) (position, bool, error) {
+// position resumed from when it sent none), whether it resumed, and after
+// a reset when the tail's oldest turn began, zero when it's all there.
+func (v *view) catchUp(w io.Writer, enc *encoder, after string) (position, bool, time.Time, error) {
 	// A line trimmed may have lost the parts after the position's; line 0
 	// is before any, which an empty ring's synced says.
 	if inc, p, ok := parsePosition(after); ok && inc == v.inc && (p.line > v.gone || p.line == 0 && v.gone == 0) && p.line <= v.last {
 		var b bytes.Buffer
 		if at, ok := v.resume(enc, &b, p); ok {
 			_, err := w.Write(b.Bytes())
-			return at, true, err
+			return at, true, time.Time{}, err
 		}
 		*enc = encoder{} // what it read is the tail's to read again
 	}
-	at, err := v.tail(w, enc)
-	return at, false, err
+	at, from, err := v.tail(w, enc)
+	return at, false, from, err
 }
 
 // resume writes the frames after p to b, the lines up to it read but not
@@ -130,8 +147,9 @@ func (v *view) resume(enc *encoder, b *bytes.Buffer, p position) (position, bool
 
 // tail writes a reset, then the ring's newest tailTurns user turns, bound
 // by tailFrames and tailBytes: a bigger turn keeps its newest part. The
-// lines before them are read but not sent.
-func (v *view) tail(w io.Writer, enc *encoder) (position, error) {
+// lines before them are read but not sent. It says when what it left out
+// ends, zero when it left nothing.
+func (v *view) tail(w io.Writer, enc *encoder) (position, time.Time, error) {
 	// First what each line makes, read through a converter of its own.
 	type cost struct{ frames, bytes int }
 	costs := make([]cost, len(v.ring))
@@ -144,30 +162,73 @@ func (v *view) tail(w io.Writer, enc *encoder) (position, error) {
 			costs[i] = cost{cw.frames - f, cw.bytes - b}
 		}
 	}
-	start, turns, frames, size := len(v.ring), 0, 0, 0
-	for i := len(v.ring) - 1; i >= 0 && turns < tailTurns; i-- {
-		c := costs[i]
-		if start < len(v.ring) && (frames+c.frames > tailFrames || size+c.bytes > tailBytes) {
-			break
-		}
-		start, frames, size = i, frames+c.frames, size+c.bytes
-		if isEcho(v.ring[i]) {
-			turns++
-			if turns == tailTurns && i > 0 && isTimeMark(v.ring[i-1]) && frames+costs[i-1].frames <= tailFrames {
-				start, frames, size = i-1, frames+costs[i-1].frames, size+costs[i-1].bytes
+	// A turn starts at its echo, with the time mark before it: whole turns
+	// go, newest first, while they fit, so the cursor reaches the rest.
+	// Only a newest turn too big on its own goes in part, its newest.
+	var begins []int
+	for i, l := range v.ring {
+		if isEcho(l) {
+			b := i
+			if i > 0 && isTimeMark(v.ring[i-1]) {
+				b = i - 1
 			}
+			begins = append(begins, b)
 		}
 	}
+	start, turns, frames, size := len(v.ring), 0, 0, 0
+	from := start // where the oldest turn sent begins, whole or not
+	for k := len(begins) - 1; k >= -1 && turns < tailTurns; k-- {
+		lo := 0
+		if k >= 0 {
+			lo = begins[k]
+		}
+		f, b := 0, 0
+		for _, c := range costs[lo:start] {
+			f, b = f+c.frames, b+c.bytes
+		}
+		if frames+f > tailFrames || size+b > tailBytes {
+			if turns == 0 {
+				// Its newest lines, always one.
+				for start > lo && (start == len(v.ring) || frames+costs[start-1].frames <= tailFrames && size+costs[start-1].bytes <= tailBytes) {
+					start--
+					frames, size = frames+costs[start].frames, size+costs[start].bytes
+				}
+				if from = lo; k >= 0 {
+					turns = 1
+				}
+			}
+			break
+		}
+		if lo == start {
+			break
+		}
+		start, from, frames, size = lo, lo, frames+f, size+b
+		if k >= 0 {
+			turns++
+		}
+	}
+	// The transcript holds what came before the ring: everything before a
+	// restart, a rewind or a trim.
+	file := start == 0 && !v.from.IsZero()
 	r := resetLine{Type: typeReset, Inc: v.inc, Turns: turns, Frames: frames, Bytes: size,
-		Older: start > 0 || !v.from.IsZero(), File: start == 0 && !v.from.IsZero()}
-	if t := v.markBefore(start); !t.IsZero() {
-		r.Before = t.UnixMilli()
-	} else if !v.from.IsZero() {
-		r.Before = v.from.UnixMilli()
+		Older: start > 0 || file, File: file}
+	var cursor time.Time
+	if file {
+		cursor = v.from
+	} else if t := v.markBefore(from); !t.IsZero() {
+		cursor = t
+	} else {
+		cursor = v.from
+	}
+	if !cursor.IsZero() {
+		r.Before = cursor.UnixMilli()
+	}
+	if !r.Older {
+		cursor = time.Time{}
 	}
 	b, _ := jsonx.Marshal(r)
 	if err := writeLine(w, b); err != nil {
-		return position{}, err
+		return position{}, cursor, err
 	}
 	var at position
 	var u unpacker
@@ -178,13 +239,32 @@ func (v *view) tail(w io.Writer, enc *encoder) (position, error) {
 		}
 		k, err := enc.replayN(w, &u, l, v.seq[i], skip)
 		if err != nil {
-			return at, err
+			return at, cursor, err
 		}
 		if k > skip {
 			at = position{v.seq[i], k - 1}
 		}
 	}
-	return at, nil
+	return at, cursor, nil
+}
+
+// tailExchanges is what of the archived exchanges a catch-up sends: none
+// on a resume, which had them; after a reset those from the tail's oldest
+// turn on (from; all when zero), the newest within the tail's bounds.
+func tailExchanges(es []event.Exchange, resumed bool, from time.Time) []event.Exchange {
+	if resumed {
+		return nil
+	}
+	i, size := len(es), 0
+	for i > 0 && len(es)-i < tailFrames {
+		e := es[i-1]
+		b, _ := jsonx.Marshal(e)
+		if !from.IsZero() && e.At.Before(from) || size+len(b) > tailBytes {
+			break
+		}
+		i, size = i-1, size+len(b)
+	}
+	return es[i:]
 }
 
 // markBefore is the time of the last time mark at or before line i of the

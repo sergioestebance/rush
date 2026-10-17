@@ -599,7 +599,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 						emit(b)
 					}
 				}
-				sendFileTail(info, emit)
+				sendFileTail(info, time.Time{}, emit)
 				// A stopped host's frames have no position: the next open
 				// starts afresh.
 				emit(syncedFrame(""))
@@ -618,10 +618,16 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		case alive:
 			if c, err := host.Dial(id); err == nil {
 				_ = send("reset", nil)
-				if !info.ReplayFrom.IsZero() {
+				switch {
+				case info.ReplayFrom.IsZero():
+				case full:
 					sendHistory(info, info.ReplayFrom, full, emit)
+				default:
+					sendFileTail(info, info.ReplayFrom, emit)
 				}
-				err := pump(ctx, c, w, fl)
+				// A host from before resuming ends its replay with its info,
+				// and has no positions: synced follows that, with none.
+				err := pump(ctx, c, w, fl, !full)
 				c.Close()
 				if err != nil || ctx.Err() != nil {
 					return
@@ -670,8 +676,9 @@ func sse(w io.Writer, fl http.Flusher, data []byte) error {
 }
 
 // pump passes a host's lines on as events until the host or the client
-// goes; an error is the client gone.
-func pump(ctx interface{ Done() <-chan struct{} }, c *host.Client, w io.Writer, fl http.Flusher) error {
+// goes; an error is the client gone. With sync, synced with no position
+// follows the first info, the end of the host's replay.
+func pump(ctx interface{ Done() <-chan struct{} }, c *host.Client, w io.Writer, fl http.Flusher, sync bool) error {
 	keep := time.NewTicker(15 * time.Second)
 	defer keep.Stop()
 	for {
@@ -692,6 +699,18 @@ func pump(ctx interface{ Done() <-chan struct{} }, c *host.Client, w io.Writer, 
 			}
 			if err := sse(w, fl, b); err != nil {
 				return err
+			}
+			if !sync {
+				continue
+			}
+			if v, _ := host.Decode(l); v != nil {
+				if _, ok := v.(host.InfoEvent); !ok {
+					continue
+				}
+				sync = false
+				if err := sse(w, fl, syncedFrame("")); err != nil {
+					return err
+				}
 			}
 		}
 	}

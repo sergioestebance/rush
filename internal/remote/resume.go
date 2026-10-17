@@ -33,6 +33,7 @@ const (
 type at struct {
 	inc, pos string
 	fresh    bool // in a reset's catch-up: until synced, there's no position
+	ended    bool // the last host dialled got to synced
 }
 
 func newAt(after string) *at {
@@ -51,8 +52,9 @@ func (a *at) after() string {
 	return a.pos
 }
 
-// synced is whether the client holds a position its frames came to.
-func (a *at) synced() bool { return !a.fresh && a.pos != "" }
+// synced is whether the client holds a position its frames came to, its
+// last catch-up ended.
+func (a *at) synced() bool { return a.ended && !a.fresh && a.pos != "" }
 
 // pumpAfter is pump for a host dialled with DialAfter: its reset is
 // followed by the tail's turns from the transcript and its cut, each
@@ -61,6 +63,7 @@ func pumpAfter(ctx interface{ Done() <-chan struct{} }, c *host.Client, w io.Wri
 	keep := time.NewTicker(15 * time.Second)
 	defer keep.Stop()
 	emit := func(b []byte) error { return sse(w, fl, b) }
+	a.ended = false
 	for {
 		select {
 		case <-ctx.Done():
@@ -88,7 +91,7 @@ func pumpAfter(ctx interface{ Done() <-chan struct{} }, c *host.Client, w io.Wri
 				}
 				continue
 			case host.Synced:
-				a.pos, a.fresh = v.Position, false
+				a.pos, a.fresh, a.ended = v.Position, false, true
 				if i := strings.LastIndexByte(v.Position, ':'); i >= 0 {
 					a.inc = v.Position[:i]
 				}
@@ -142,10 +145,13 @@ func topUp(info host.Info, r host.Reset, emit func([]byte) error) error {
 	return nil
 }
 
-// sendFileTail is the tail of a session whose host isn't running: all of
-// it from the transcript, with the cut first.
-func sendFileTail(info host.Info, emit func([]byte)) {
-	before := time.Now()
+// sendFileTail is the tail of what a session's transcript holds from
+// before before (all of it when zero), with the cut first: a session whose
+// host isn't running, or one before resuming that trimmed its replay.
+func sendFileTail(info host.Info, before time.Time, emit func([]byte)) {
+	if before.IsZero() {
+		before = time.Now()
+	}
 	frames, n, more := fileTail(info, before, 0, tailTurns, tailFrames, tailBytes)
 	if more {
 		emit(cutFrame(before, n))
@@ -246,8 +252,10 @@ func sessionTail(kind agent.Kind, s agent.Session, before time.Time, skip, turns
 }
 
 // readTurns reads the end of s's transcript before before, at least want
-// user turns of it where there are that many: a tail reader's window
-// grows until it holds them.
+// user turns of it and the start of the one before, where there are that
+// many: a tail reader's window grows until it holds them, however deep,
+// so a page never says it reached the start when it didn't. cut is whether
+// there's more before what it read.
 func readTurns(kind agent.Kind, s agent.Session, before time.Time, want int) ([]event.Event, bool) {
 	if tb, ok := agent.As[agent.HistoryTailBeforeReader](kind); ok {
 		for most := int64(1 << 20); ; most *= 4 {
@@ -255,7 +263,7 @@ func readTurns(kind agent.Kind, s agent.Session, before time.Time, want int) ([]
 			if err != nil {
 				return nil, false
 			}
-			if !cut || userTurns(evs) > want || most >= 64<<20 {
+			if !cut || userTurns(evs) > want {
 				return evs, cut
 			}
 		}
@@ -300,7 +308,9 @@ func userTurns(evs []event.Event) int {
 }
 
 // pickTurns is fileTail's choice from evs, a transcript's end (cut: not
-// all of it).
+// all of it). Turns go whole, newest first, while they fit: n counts only
+// those sent, so the next cursor reaches the rest. Only a newest turn too
+// big on its own is sent in part, its newest; its start is lost.
 func pickTurns(evs []event.Event, cut bool, skip, turns, frames, size int) (out [][]byte, n int, more bool) {
 	var starts []int
 	for i, ev := range evs {
@@ -308,34 +318,49 @@ func pickTurns(evs []event.Event, cut bool, skip, turns, frames, size int) (out 
 			starts = append(starts, i)
 		}
 	}
-	end := len(evs)
+	if skip > len(starts) {
+		return nil, 0, cut
+	}
+	end, bytes := len(evs), 0
 	if skip > 0 {
-		if skip >= len(starts) {
-			return nil, 0, false
-		}
 		end = starts[len(starts)-skip]
 	}
-	begin, first := 0, len(starts)-skip-turns
-	if first > 0 {
-		begin = first
-		begin = starts[begin]
-	}
-	n = min(turns, len(starts)-skip)
-	more = cut || begin > 0
-	bytes := 0
-	for i := end - 1; i >= begin; i-- {
-		b, err := event.Marshal(evs[i])
-		if err != nil {
-			continue
+	// Turn k is evs[starts[k]:end]; k -1 is what comes before the first,
+	// part of a turn whose start wasn't read when cut.
+	for k := len(starts) - 1 - skip; k >= -1; k-- {
+		if n == turns {
+			return out, n, k >= 0 || cut || end > 0
 		}
-		if len(out) > 0 && (len(out) >= frames || bytes+len(b) > size) {
-			more = true
-			break
+		lo := 0
+		if k >= 0 {
+			lo = starts[k]
+		} else if cut {
+			return out, n, true
 		}
-		out, bytes = append(out, b), bytes+len(b)
+		var seg [][]byte
+		sb := 0
+		for _, ev := range evs[lo:end] {
+			if b, err := event.Marshal(ev); err == nil {
+				seg, sb = append(seg, b), sb+len(b)
+			}
+		}
+		if len(out)+len(seg) > frames || bytes+sb > size {
+			if len(out) == 0 {
+				// One turn bigger than the tail: its newest part.
+				i := len(seg) - 1
+				for sb = len(seg[i]); i > 0 && len(seg)-i < frames && sb+len(seg[i-1]) <= size; i-- {
+					sb += len(seg[i-1])
+				}
+				// It counts as given, even before any turn: asked again,
+				// it would come the same.
+				return seg[i:], 1, true
+			}
+			return out, n, true
+		}
+		out, bytes, end = append(seg, out...), bytes+sb, lo
+		if k >= 0 {
+			n++
+		}
 	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out, n, more
+	return out, n, false
 }
