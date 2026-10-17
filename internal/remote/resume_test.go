@@ -450,3 +450,121 @@ func runningServer(t *testing.T) *Server {
 	}
 	return s
 }
+
+// A host from before resuming replays all it has, then its info: synced
+// follows that, with no position.
+func TestTheRuntimeAnswersAPositionRunsOnAnOldHost(t *testing.T) {
+	s := runningServer(t)
+	f := startFakeHost(t, host.Root(), "e0e0e0e0", "old", "/work", evLine(t, event.Message{Role: "assistant", Parts: []event.Part{{Kind: event.Text, Text: "replayed"}}}))
+	old := f.info // a copy: the fake reads its own as it answers
+	old.Proto = host.ResumeFrom - 1
+	writeInfo(t, old)
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	got := through(t, open(t, ts, "/api/sessions/e0e0e0e0/events?after="+url.QueryEscape("x:1.0")), "synced")
+	if k := strings.Join(kinds(got), " "); k != "reset message info synced" {
+		t.Fatalf("frames %s", k)
+	}
+	if field(t, got[3], "position") != "" {
+		t.Errorf("an old host's synced has a position: %s", got[3].E)
+	}
+}
+
+// Pages of turns too big for one page each send whole turns, and the next
+// cursor goes on from the oldest sent: every turn comes once.
+func TestOlderTurnsComeFromTheHistoryRouteInWholeTurns(t *testing.T) {
+	var evs []event.Event
+	for i := range 30 {
+		evs = append(evs, event.Message{Role: "user", Parts: []event.Part{{Kind: event.Text, Text: fmt.Sprint("q", i)}}})
+		for j := range 39 {
+			evs = append(evs, event.Message{Role: "assistant", Parts: []event.Part{{Kind: event.Text, Text: fmt.Sprint(i, ".", j)}}})
+		}
+	}
+	var seen []string
+	skip := 0
+	for {
+		frames, n, more := pickTurns(evs, false, skip, tailTurns, tailFrames, tailBytes)
+		var ws []wire
+		for _, b := range frames {
+			var w wire
+			_ = jsonx.Unmarshal(b, &w)
+			ws = append(ws, w)
+		}
+		var qs []string
+		for _, tx := range texts(ws) {
+			if strings.HasPrefix(tx, "q") {
+				qs = append(qs, tx)
+			}
+		}
+		if len(qs) != n || len(frames) != 40*n {
+			t.Fatalf("at %d: %d turns said, %d sent in %d frames", skip, n, len(qs), len(frames))
+		}
+		seen = append(qs, seen...)
+		skip += n
+		if !more {
+			break
+		}
+	}
+	for i, q := range seen {
+		if q != fmt.Sprint("q", i) {
+			t.Fatalf("turns %v", seen)
+		}
+	}
+	if len(seen) != 30 {
+		t.Fatalf("%d of 30 turns", len(seen))
+	}
+}
+
+// deepAgent's transcript is 200 turns, of which a tail of most bytes holds
+// one per MB.
+type deepAgent struct{ countAgent }
+
+func init() { agent.Register(deepAgent{}) }
+
+func (deepAgent) Kind() agent.Kind { return "deep" }
+
+func (deepAgent) HistoryTailBefore(_ agent.Session, most int64, _ time.Time) ([]event.Event, bool, error) {
+	n := min(200, int(most>>20))
+	var evs []event.Event
+	for i := 200 - n; i < 200; i++ {
+		evs = append(evs, event.Message{Role: "user", Parts: []event.Part{{Kind: event.Text, Text: fmt.Sprint("q", i)}}})
+	}
+	return evs, n < 200, nil
+}
+
+// A page deeper than any window yet read keeps reading: it never says it
+// reached the start when it didn't.
+func TestOlderTurnsComeFromTheHistoryRouteHoweverDeep(t *testing.T) {
+	frames, n, more := sessionTail("deep", agent.Session{}, time.Now(), 180, tailTurns, tailFrames, tailBytes)
+	if n != 10 || !more || !strings.Contains(string(frames[0]), `"q10"`) {
+		t.Fatalf("%d turns, more %v", n, more)
+	}
+	if _, n, more = sessionTail("deep", agent.Session{}, time.Now(), 190, tailTurns, tailFrames, tailBytes); n != 10 || more {
+		t.Fatalf("the oldest page: %d turns, more %v", n, more)
+	}
+}
+
+// A host that stops before its catch-up ends still gets the client to
+// synced: the stopped host's.
+func TestAStoppedHostSendsAChangedInfoAloneOnceSynced(t *testing.T) {
+	s := runningServer(t)
+	id := "e1e1e1e1"
+	resumeHost(t, id, func(n int, after string) []string {
+		if n == 0 { // it goes before its synced
+			i, _ := host.ReadInfo(id)
+			i.HostPID, i.State, i.UpdatedAt = 0, "stopped", time.Now()
+			writeInfo(t, i)
+			return []string{evAt(t, "one", "121.0")}
+		}
+		return nil
+	})
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	got := through(t, open(t, ts, "/api/sessions/"+id+"/events?after="+url.QueryEscape("inc:120.0")), "synced")
+	if k := strings.Join(kinds(got), " "); !strings.HasPrefix(k, "message reset info") {
+		t.Fatalf("frames %s", k)
+	}
+	if field(t, got[len(got)-1], "position") != "" {
+		t.Errorf("synced %s", got[len(got)-1].E)
+	}
+}

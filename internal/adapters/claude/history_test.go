@@ -44,13 +44,14 @@ func TestHistoryEndsBackgroundTasks(t *testing.T) {
 
 // counted is a file that counts what's read of it.
 type counted struct {
-	f    *os.File
-	read int64
+	f           *os.File
+	read, calls int64
 }
 
 func (c *counted) ReadAt(p []byte, off int64) (int, error) {
 	n, err := c.f.ReadAt(p, off)
 	c.read += int64(n)
+	c.calls++
 	return n, err
 }
 
@@ -93,5 +94,23 @@ func TestHistoryTailReadsFromTheEnd(t *testing.T) {
 	}
 	if c.read > size/2 {
 		t.Errorf("read %d of %d bytes for a tail", c.read, size)
+	}
+}
+
+// A long line is read back in growing reads, not one small read after
+// another, each copying all read so far.
+func TestHistoryTailReadsALongLineInFewReads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	line := `{"type":"assistant","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"` + strings.Repeat("w", 4<<20) + `"}]},"timestamp":"2026-09-29T10:00:00Z"}` + "\n"
+	must(t, os.WriteFile(path, []byte(line), 0o644))
+	f, err := os.Open(path)
+	must(t, err)
+	defer f.Close()
+	c := &counted{f: f}
+	if _, _, _, err := tailWindow(c, int64(len(line)), 1<<20, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if c.calls > 10 {
+		t.Errorf("%d reads for one line of %d bytes", c.calls, len(line))
 	}
 }

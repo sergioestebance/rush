@@ -126,7 +126,7 @@ func linesBack(f io.ReaderAt, end int64, each func(start int64, line []byte) boo
 			if off == 0 {
 				break
 			}
-			n := min(chunk, off)
+			n := min(max(chunk, int64(len(buf))), off) // doubling: a long line is copied a few times, not once a chunk
 			next := make([]byte, n+int64(len(buf)))
 			if _, err := f.ReadAt(next[:n], off-n); err != nil && err != io.EOF {
 				return err

@@ -489,3 +489,93 @@ func TestAColdChatGetsOnlyItsTailFromTheRing(t *testing.T) {
 		t.Errorf("the tail starts with %T, not its first turn's time mark", ev)
 	}
 }
+
+// resetOf is the reset a viewer with no position gets first, and what
+// follows it before synced.
+func resetOf(t *testing.T, s *server) (Reset, [][]byte) {
+	t.Helper()
+	got, _ := watch(t, s, "").catchUp(t)
+	ev, _ := Decode(got[0])
+	r, ok := ev.(Reset)
+	if !ok {
+		t.Fatalf("no reset first: %s", got[0])
+	}
+	return r, got[1:]
+}
+
+// A tail of turns too big for its bounds sends whole turns only, and its
+// cursor is where the oldest of them begins.
+func TestAColdChatGetsOnlyItsTailFromTheRingInWholeTurns(t *testing.T) {
+	s := resumeHost(t)
+	for i := range 10 {
+		put(s, echoLine(fmt.Sprint("turn ", i)))
+		for j := range 39 {
+			put(s, msgLine(fmt.Sprint(i, ".", j)))
+		}
+	}
+	r, got := resetOf(t, s)
+	// 41 frames a turn, the mark and the echo with them: 7 fit in 300.
+	if r.Turns != 7 || r.Frames != 7*41 || !r.Older || r.File {
+		t.Fatalf("reset %+v", r)
+	}
+	first, _ := Decode(got[0])
+	stamp, ok := first.(Stamp)
+	if !ok || !stamp.At.Equal(r.Before) {
+		t.Fatalf("the tail starts with %T, its cursor %v", first, r.Before)
+	}
+	if ev, _ := Decode(got[1]); ev.(Sent).Text != "turn 3" {
+		t.Fatalf("the oldest turn sent is %+v", ev)
+	}
+}
+
+// A host started again, or rewound, on a conversation with a transcript
+// leaves what came before that to the transcript, as it does a trim.
+func TestAColdChatGetsOnlyItsTailAfterAWake(t *testing.T) {
+	s := resumeHost(t)
+	s.began = true
+	put(s, echoLine("again"), msgLine("ok"))
+	r, _ := resetOf(t, s)
+	if !r.File || !r.Older || r.Before.UnixMilli() != s.info.StartedAt.UnixMilli() {
+		t.Fatalf("woken: %+v, started %v", r, s.info.StartedAt)
+	}
+	s.mu.Lock()
+	err := s.rewind("other", true, nil)
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(s, echoLine("rewound"))
+	if r, _ = resetOf(t, s); !r.File || r.Before.UnixMilli() != s.info.RewoundAt.UnixMilli() {
+		t.Fatalf("rewound: %+v, at %v", r, s.info.RewoundAt)
+	}
+}
+
+// A reset sends only the archived exchanges of its tail, within bounds.
+func TestAResetSendsOnlyTheExchangesOfItsTail(t *testing.T) {
+	s := resumeHost(t)
+	old := time.Now().Add(-time.Hour)
+	for i := range 400 {
+		if err := appendExchange(s.cfg.ID, event.Exchange{At: old, ID: fmt.Sprint("old", i), Direction: "received", Phase: "message", Text: "old"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 12 {
+		put(s, echoLine(fmt.Sprint("turn ", i)))
+		time.Sleep(2 * time.Millisecond)
+	}
+	if err := appendExchange(s.cfg.ID, event.Exchange{At: time.Now(), ID: "new", Direction: "received", Phase: "message", Text: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	_, got := resetOf(t, s)
+	var ids []string
+	for _, l := range got {
+		if ev, _ := Decode(l); ev != nil {
+			if e, ok := ev.(event.Exchange); ok {
+				ids = append(ids, e.ID)
+			}
+		}
+	}
+	if len(ids) != 1 || ids[0] != "new" {
+		t.Fatalf("exchanges sent: %d, %.5q", len(ids), ids)
+	}
+}
