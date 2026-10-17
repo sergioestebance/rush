@@ -272,6 +272,47 @@ func TestWebControlsReachTheHost(t *testing.T) {
 	f.noOp(t)
 }
 
+// A delete stops a running session first, then takes its folder and scratch,
+// so the list no longer has it; one already gone is a 404.
+func TestDeleteTakesASessionForGood(t *testing.T) {
+	shortHome(t)
+	f := startFakeHost(t, host.Root(), "feedbeef", "job", "/work")
+	s := &Server{Config: Config{Name: "box"}, Token: strings.Repeat("a", 64)}
+	h := s.Handler()
+	hdr := map[string]string{"Authorization": "Bearer " + s.Token}
+	del := func() *httptest.ResponseRecorder { return do(t, h, "DELETE", "/api/sessions/feedbeef", "", hdr) }
+
+	deleteWait = 50 * time.Millisecond
+	t.Cleanup(func() { deleteWait = 10 * time.Second })
+	if w := del(); w.Code != http.StatusConflict {
+		t.Fatalf("a host that won't stop: %d %s", w.Code, w.Body)
+	}
+	if got := f.op(t); got["op"] != "stop" {
+		t.Fatalf("host got %v, want a stop", got)
+	}
+
+	scratch := host.TempDir("feedbeef")
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.info.HostPID = 0 // stopped
+	f.writeInfo(t, filepath.Join(host.Root(), "feedbeef"))
+	if w := del(); w.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", w.Code, w.Body)
+	}
+	for _, p := range []string{filepath.Join(host.Root(), "feedbeef"), scratch} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s outlived the delete: %v", p, err)
+		}
+	}
+	if w := do(t, h, "GET", "/api/sessions", "", hdr); strings.Contains(w.Body.String(), "feedbeef") {
+		t.Errorf("a deleted session is listed: %s", w.Body)
+	}
+	if w := del(); w.Code != http.StatusNotFound {
+		t.Errorf("repeated delete: %d", w.Code)
+	}
+}
+
 func TestPairingCodeSignsInOnce(t *testing.T) {
 	s := newServer(t)
 	s.Config.Origin = "https://rush.test"

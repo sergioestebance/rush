@@ -158,6 +158,18 @@ func readInfoFile(id string) (Info, error) {
 	return info, err
 }
 
+// Remove takes a session that isn't running for good: its folder, with its
+// transcript and info, and its scratch. A session already gone is no error.
+func Remove(id string) error {
+	if info, err := ReadInfo(id); err == nil && Alive(info.HostPID) {
+		return errors.New("the session is still running")
+	}
+	if tmp := TempDir(id); IsTempDir(tmp) {
+		_ = os.RemoveAll(tmp)
+	}
+	return os.RemoveAll(dir(id))
+}
+
 // List returns every rush-mode session, newest first.
 func List() []Info { return new(Lister).List() }
 
