@@ -237,6 +237,9 @@ func TestTheRuntimeAnswersAPositionWasRewound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if s.inc() == before {
+		t.Fatal("a rewind kept the incarnation")
+	}
 	put(s, echoLine("again"))
 	upTo(s, 140)
 	resets(t, s, before+":120.0")
@@ -453,5 +456,36 @@ func TestPositionsRead(t *testing.T) {
 	}
 	if got := Numbered([]byte(`{"type":"agtop_ev","ev":{},"agtop_s":"12.3"}`)); got != "12.3" {
 		t.Errorf("numbered %q", got)
+	}
+}
+
+// With no position, a ring of many turns sends its newest tailTurns, from
+// the time mark that starts the oldest of them, and says there's more.
+func TestAColdChatGetsOnlyItsTailFromTheRing(t *testing.T) {
+	s := resumeHost(t)
+	for i := range 15 {
+		put(s, echoLine(fmt.Sprint("turn ", i)), msgLine(fmt.Sprint("answer ", i)))
+	}
+	got, _ := watch(t, s, "").catchUp(t)
+	ev, _ := Decode(got[0])
+	r, ok := ev.(Reset)
+	if !ok || r.Turns != tailTurns || !r.Older || r.File || r.Before.IsZero() {
+		t.Fatalf("reset %+v", ev)
+	}
+	var sent []string
+	for _, l := range got[1:] {
+		if ev, _ := Decode(l); ev != nil {
+			if m, ok := ev.(Sent); ok {
+				sent = append(sent, m.Text)
+			}
+		}
+	}
+	if len(sent) != tailTurns || sent[0] != "turn 5" || sent[9] != "turn 14" {
+		t.Fatalf("turns %q", sent)
+	}
+	if ev, _ := Decode(got[1]); ev == nil {
+		t.Fatal("no first frame")
+	} else if _, ok := ev.(Stamp); !ok {
+		t.Errorf("the tail starts with %T, not its first turn's time mark", ev)
 	}
 }
