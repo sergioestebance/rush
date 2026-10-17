@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("GET /api/sessions/{id}/events", s.events)
 	api.HandleFunc("GET /api/sessions/{id}/history", s.history)
 	api.HandleFunc("POST /api/sessions/{id}/op", s.op)
+	api.HandleFunc("DELETE /api/sessions/{id}", s.remove)
 	api.HandleFunc("POST /api/git", s.git)
 	api.HandleFunc("GET /api/others", s.others)
 	api.HandleFunc("POST /api/pair", s.pair)
@@ -500,6 +501,38 @@ func (s *Server) op(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// deleteWait is how long a delete waits for a running session to stop.
+var deleteWait = 10 * time.Second
+
+// remove takes a session for good, as its owner deleting a chat does: a
+// running one is stopped first, then its folder and scratch go, so the list
+// no longer has it. A session already gone answers 404.
+func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !validID(id) {
+		fail(w, http.StatusNotFound, "no such session")
+		return
+	}
+	if info, err := host.ReadInfo(id); err == nil && host.Alive(info.HostPID) {
+		if c, err := host.Dial(id); err == nil {
+			_ = c.Stop()
+			c.Close()
+		}
+		for until := time.Now().Add(deleteWait); host.Alive(info.HostPID); {
+			if time.Now().After(until) || r.Context().Err() != nil {
+				fail(w, http.StatusConflict, "the session didn't stop")
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if err := host.Remove(id); err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // proxy passes a request for /m/<peer>/api/… on to that peer's serve,

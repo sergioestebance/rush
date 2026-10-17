@@ -34,6 +34,10 @@ server in front of those hosts. This is the simpler plan that replaced
     bytes (`pictures`: png, jpeg, gif or webp, at most 8, each under 20 MB, 64 MB a message);
     serve writes them to the session's scratch folder and the host reads them
     from there, so no client path ever reaches the agent.
+  - `DELETE /api/sessions/{id}` takes a session for good: a running host is
+    sent a stop and given 10s to exit (409 if it doesn't), then the session's
+    folder, transcript and scratch go and the list no longer has it (204).
+    One already gone is a 404.
   - `POST /api/git` runs one read-only git command (`rev-parse`, `diff`,
     `ls-files`, `log`, `show` and the like) in a session's folder, or its
     repository's top. It's how the web app's *Changes* and an attached
