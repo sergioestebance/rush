@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"errors"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/0xdeafcafe/photon/jsonx"
@@ -25,6 +26,8 @@ type historyLine struct {
 	UUID          string         `json:"uuid"`
 	Message       jsontext.Value `json:"message"`
 	ToolUseResult jsontext.Value `json:"toolUseResult"`
+	Operation     string         `json:"operation"`
+	Content       jsontext.Value `json:"content"`
 }
 
 // History reads s's transcript back as rush's own events: its messages,
@@ -40,9 +43,10 @@ func (Adapter) History(s agent.Session, before time.Time) ([]event.Event, error)
 	}
 	defer f.Close()
 	var (
-		out []event.Event
-		n   headless.Neutral
-		r   = jsonx.NewLineReader(f)
+		out  []event.Event
+		n    headless.Neutral
+		r    = jsonx.NewLineReader(f)
+		told = map[string]bool{}
 	)
 	for {
 		line, ok := r.Next()
@@ -55,6 +59,16 @@ func (Adapter) History(s agent.Session, before time.Time) ([]event.Event, error)
 		}
 		if !before.IsZero() && !l.Timestamp.IsZero() && !l.Timestamp.Before(before) {
 			break
+		}
+		if text, ok := notice(l); ok {
+			for _, done := range ended(text) {
+				key := done.ID + "," + done.CallID + "," + done.Status
+				if !told[key] {
+					told[key] = true
+					out = append(out, done)
+				}
+			}
+			continue
 		}
 		if l.Type != "user" && l.Type != "assistant" {
 			continue
@@ -70,6 +84,59 @@ func (Adapter) History(s agent.Session, before time.Time) ([]event.Event, error)
 		out = append(out, n.Event(ev)...)
 	}
 	return out, r.Err()
+}
+
+// notice is a line's word that a background task ended: Claude Code queues
+// it as it comes, and only sometimes writes it as a user message too.
+func notice(l historyLine) (string, bool) {
+	var text string
+	switch {
+	case l.Type == "queue-operation" && l.Operation == "enqueue":
+		if jsonx.Unmarshal(l.Content, &text) != nil {
+			return "", false
+		}
+	case l.Type == "user":
+		var m struct {
+			Content string `json:"content"`
+		}
+		if jsonx.Unmarshal(l.Message, &m) != nil {
+			return "", false
+		}
+		text = m.Content
+	default:
+		return "", false
+	}
+	text = strings.TrimSpace(text)
+	return text, strings.HasPrefix(text, "<task-notification>")
+}
+
+// ended is the tasks a notice says ended: the history keeps no task events,
+// so without it a background agent started before a restart runs forever.
+func ended(s string) []event.TaskDone {
+	var out []event.TaskDone
+	for _, seg := range strings.Split(s, "<task-notification>")[1:] {
+		seg, _, _ = strings.Cut(seg, "</task-notification>")
+		status := tag(seg, "status")
+		switch status {
+		case "completed", "failed", "stopped":
+		case "killed":
+			status = "stopped"
+		default:
+			continue
+		}
+		out = append(out, event.TaskDone{ID: tag(seg, "task-id"), CallID: tag(seg, "tool-use-id"),
+			Status: status, OutputFile: tag(seg, "output-file"), Summary: tag(seg, "summary")})
+	}
+	return out
+}
+
+func tag(s, name string) string {
+	_, rest, ok := strings.Cut(s, "<"+name+">")
+	if !ok {
+		return ""
+	}
+	v, _, _ := strings.Cut(rest, "</"+name+">")
+	return strings.TrimSpace(v)
 }
 
 var _ agent.HistoryReader = Adapter{}
