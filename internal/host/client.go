@@ -307,11 +307,24 @@ func Decode(line []byte) (any, error) {
 		Reply     jsontext.Value  `json:"reply"`
 		T         int64           `json:"t"`
 		Ev        jsontext.Value  `json:"ev"`
+		Position  string          `json:"position"`
 	}
 	if err := jsonx.Unmarshal(line, &head); err != nil {
 		return nil, err
 	}
 	switch head.Type {
+	case typeReset:
+		var r resetLine
+		if err := jsonx.Unmarshal(line, &r); err != nil {
+			return nil, err
+		}
+		out := Reset{Inc: r.Inc, Turns: r.Turns, Frames: r.Frames, Bytes: r.Bytes, Older: r.Older, File: r.File}
+		if r.Before != 0 {
+			out.Before = time.UnixMilli(r.Before)
+		}
+		return out, nil
+	case typeSynced:
+		return Synced{Position: head.Position}, nil
 	case typeInfo:
 		head.Info.migrate()
 		return InfoEvent{Info: head.Info}, nil
@@ -364,9 +377,25 @@ func Dial(id string) (*Client, error) { return dial(id, Proto) }
 // session's lines come as Claude Code wrote them.
 func DialRaw(id string) (*Client, error) { return dial(id, 0) }
 
+// DialAfter connects for a catch-up that resumes after the position after
+// ("" for none): the frames after it, or a Reset and the tail of the ring,
+// then Synced. Every frame from the ring carries its place (Numbered).
+// A host from before Proto 12 sends its whole replay, as to Dial.
+func DialAfter(id, after string) (*Client, error) {
+	return dialHello(id, op{Op: "hello", Proto: Proto, Resume: true, After: after})
+}
+
 // dial connects saying hello as a client of protocol proto; 0 says none,
 // as a rush from before the hello.
 func dial(id string, proto int) (*Client, error) {
+	if proto == 0 {
+		return dialHello(id, op{})
+	}
+	return dialHello(id, op{Op: "hello", Proto: proto})
+}
+
+// dialHello connects saying hi, or nothing when it has no op.
+func dialHello(id string, hi op) (*Client, error) {
 	c, err := net.Dial("unix", SockPath(id))
 	if err != nil {
 		return nil, err
@@ -384,8 +413,8 @@ func dial(id string, proto int) (*Client, error) {
 		}
 	}()
 	cl := &Client{Lines: lines, c: c}
-	if proto > 0 {
-		if err := cl.do(op{Op: "hello", Proto: proto}); err != nil {
+	if hi.Op != "" {
+		if err := cl.do(hi); err != nil {
 			_ = c.Close()
 			return nil, err
 		}

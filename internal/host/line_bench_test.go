@@ -40,7 +40,7 @@ func BenchmarkHostTurn(b *testing.B) {
 	tc := tapConn{}
 	var n headless.Neutral
 	_ = os.MkdirAll(dir(s.cfg.ID), 0o700)
-	c := &conn{out: make(chan []byte, 1<<16), gone: make(chan struct{})}
+	c := &conn{out: make(chan outLine, 1<<16), gone: make(chan struct{})}
 	s.clients[c] = struct{}{}
 	turns := make([][][]byte, 64)
 	for i := range turns {
@@ -77,11 +77,11 @@ func TestPublishLine(t *testing.T) {
 	t.Setenv("RUSH_HOME", t.TempDir())
 	s := &server{cfg: Config{ID: "pub"}, clients: map[*conn]struct{}{}}
 	_ = os.MkdirAll(dir(s.cfg.ID), 0o700)
-	c := &conn{out: make(chan []byte, 4), gone: make(chan struct{})}
+	c := &conn{out: make(chan outLine, 4), gone: make(chan struct{})}
 	s.clients[c] = struct{}{}
 	s.info.Detail = "a <b> & c"
 	s.publish()
-	got := <-c.out
+	got := (<-c.out).l
 	want, _ := jsonx.Marshal(map[string]any{"type": typeInfo, "info": s.info})
 	if string(got) != string(want) {
 		t.Fatalf("got  %s\nwant %s", got, want)

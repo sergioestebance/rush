@@ -258,7 +258,7 @@ type Task struct {
 // 6 Claude Code's sessions as rush's own events too, to a client that
 // says it reads them, 7 steering with a queued message (queue_send's
 // guide). A client sends its build's in the hello.
-const Proto = 11 // away; 10 added idle host sleep; 9 guarded compaction; 8 exchanges
+const Proto = 12 // numbered frames, resume; 11 away; 10 idle host sleep; 9 guarded compaction; 8 exchanges
 
 // Limit describes a usage limit that stopped the session.
 type Limit struct {
@@ -350,6 +350,8 @@ const (
 	typeContext  = "agtop_context"
 	typeReply    = "agtop_reply"
 	typeTime     = "agtop_time"
+	typeReset    = "agtop_reset"
+	typeSynced   = "agtop_synced"
 )
 
 type server struct {
@@ -374,9 +376,13 @@ type server struct {
 	spent         float64  // the running process's last cost total: see TurnCost
 	ring          [][]byte // big lines packed: see pack
 	ringN         int      // the ring's size as written
-	pk            packer
-	clients       map[*conn]struct{}
-	pending       map[string]asked
+	// seq is each ring line's number, beside it: line is the last number
+	// given, gone the last one trimmed (see resume.go).
+	seq        []int
+	line, gone int
+	pk         packer
+	clients    map[*conn]struct{}
+	pending    map[string]asked
 	// afterAsk is a message sent now while the agent asked something: it
 	// waited in the queue, and goes as soon as that's answered.
 	afterAsk bool
@@ -677,28 +683,30 @@ func (s *server) record(line []byte) {
 	if now := time.Now(); now.Sub(s.stamped) >= 500*time.Millisecond || isEcho(line) {
 		s.stamped = now
 		b, _ := jsonx.Marshal(map[string]any{"type": typeTime, "t": now.UnixMilli()})
-		s.ring = append(s.ring, b)
+		s.line++
+		s.ring, s.seq = append(s.ring, b), append(s.seq, s.line)
 		s.ringN += len(b)
 		for c := range s.clients {
-			c.push(b)
+			c.pushN(b, s.line)
 		}
 	}
 	if isWholeMessage(line) {
-		kept := s.ring[:0]
+		kept, seq := s.ring[:0], s.seq[:0]
 		n := 0
-		for _, l := range s.ring {
+		for i, l := range s.ring {
 			if !isStreamEvent(l) {
-				kept = append(kept, l)
+				kept, seq = append(kept, l), append(seq, s.seq[i])
 				n += lineLen(l)
 			}
 		}
-		s.ring, s.ringN = kept, n
+		s.ring, s.seq, s.ringN = kept, seq, n
 	}
-	s.ring = append(s.ring, s.pk.pack(line))
+	s.line++
+	s.ring, s.seq = append(s.ring, s.pk.pack(line)), append(s.seq, s.line)
 	s.ringN += len(line)
 	s.trim()
 	for c := range s.clients {
-		c.push(line)
+		c.pushN(line, s.line)
 	}
 }
 
@@ -735,7 +743,10 @@ func (s *server) trim() {
 	for _, l := range s.ring[:cut] {
 		s.ringN -= lineLen(l)
 	}
-	s.ring = slices.Clone(s.ring[cut:])
+	if cut > 0 {
+		s.gone = s.seq[cut-1]
+	}
+	s.ring, s.seq = slices.Clone(s.ring[cut:]), slices.Clone(s.seq[cut:])
 	if !from.Equal(s.info.ReplayFrom) {
 		s.info.ReplayFrom = from
 		s.publish()
@@ -1702,6 +1713,8 @@ type op struct {
 	Branch            *Branch         `json:"branch,omitempty"`  // what rewind leaves
 	Request           jsontext.Value  `json:"request,omitzero"`  // ask: the control request
 	Proto             int             `json:"proto,omitzero"`    // hello: the client's protocol
+	Resume            bool            `json:"resume,omitzero"`   // hello: a tail or a resume, not the whole replay
+	After             string          `json:"after,omitempty"`   // hello: the position to resume after
 	Without           []string        `json:"without,omitempty"` // without: what the session goes without
 	Away              *Away           `json:"away,omitempty"`    // away: nil comes back
 }
@@ -2076,6 +2089,7 @@ func (s *server) rewind(sessionID string, resume bool, left *Branch) error {
 	s.began = resume
 	s.saveConfig()
 	s.ring, s.ringN, s.stamped = nil, 0, time.Time{}
+	s.seq, s.gone = nil, s.line
 	s.info.SessionID, s.info.RewoundAt, s.info.ReplayFrom = sessionID, time.Now(), time.Time{}
 	s.info.Name = s.cfg.Name
 	s.info.Error, s.info.Retry, s.info.Needs = "", nil, ""
@@ -2118,14 +2132,23 @@ func (cfg *Config) rewindTo(sessionID string, resume bool, left *Branch, began b
 // conn is one connected client.
 type conn struct {
 	c    net.Conn
-	out  chan []byte
+	out  chan outLine
 	gone chan struct{}
 	once sync.Once
 }
 
-func (c *conn) push(line []byte) {
+// outLine is a line on its way to a client, with its number when it went
+// into the ring, 0 for the rest.
+type outLine struct {
+	l []byte
+	n int
+}
+
+func (c *conn) push(line []byte) { c.pushN(line, 0) }
+
+func (c *conn) pushN(line []byte, n int) {
 	select {
-	case c.out <- line:
+	case c.out <- outLine{line, n}:
 	default:
 		// Too far behind to catch up; it reconnects and gets a replay.
 		c.close()
@@ -2140,21 +2163,20 @@ func (c *conn) close() {
 }
 
 func (s *server) serve(nc net.Conn) {
-	proto, ops := hello(nc)
+	hi, ops := hello(nc)
 	archived := ReadExchanges(s.cfg.ID)
-	c := &conn{c: nc, out: make(chan []byte, 4096), gone: make(chan struct{})}
+	c := &conn{c: nc, out: make(chan outLine, 4096), gone: make(chan struct{})}
 	var enc *encoder
-	if proto >= eventsFrom {
+	if hi.proto >= eventsFrom {
 		enc = &encoder{}
 	}
+	numbered := hi.resume && enc != nil
+	// What the client catches up on is taken under the same lock that
+	// adds it, so every line after it comes live: none missed, none twice.
 	s.mu.Lock()
-	replay := append([][]byte(nil), s.ring...)
-	if s.commands != nil {
-		replay = append(replay, s.commands)
-	}
-	if s.context != nil {
-		replay = append(replay, s.context)
-	}
+	v := view{ring: slices.Clone(s.ring), seq: slices.Clone(s.seq), gone: s.gone, last: s.line,
+		inc: s.incarnation(), from: s.info.ReplayFrom}
+	commands, context := s.commands, s.context
 	info, _ := jsonx.Marshal(map[string]any{"type": typeInfo, "info": s.info})
 	s.clients[c] = struct{}{}
 	s.mu.Unlock()
@@ -2167,42 +2189,72 @@ func (s *server) serve(nc net.Conn) {
 
 	go func() {
 		w := bufio.NewWriterSize(nc, 64<<10)
-		write := func(l []byte) bool {
-			if enc != nil {
-				return enc.encode(w, l) == nil
+		var at position // the last numbered frame sent
+		write := func(o outLine) bool {
+			if numbered && o.n > 0 {
+				k, err := enc.frames(w, o.l, o.n, 0)
+				if k > 0 {
+					at = position{o.n, k - 1}
+				}
+				return err == nil
 			}
-			_, err := w.Write(append(l, '\n'))
+			if enc != nil {
+				return enc.encode(w, o.l) == nil
+			}
+			_, err := w.Write(append(o.l, '\n'))
 			return err == nil
 		}
-		var u unpacker
-		for _, l := range replay {
+		fail := func() { c.close() }
+		resumed := false
+		if numbered {
 			var err error
-			if enc != nil {
-				err = enc.replay(w, &u, l)
-			} else if err = u.writeTo(w, l); err == nil {
-				err = w.WriteByte('\n')
+			if at, resumed, err = v.catchUp(w, enc, hi.after); err != nil {
+				fail()
+				return
 			}
-			if err != nil {
-				c.close()
+		} else {
+			var u unpacker
+			for _, l := range v.ring {
+				var err error
+				if enc != nil {
+					err = enc.replay(w, &u, l)
+				} else if err = u.writeTo(w, l); err == nil {
+					err = w.WriteByte('\n')
+				}
+				if err != nil {
+					fail()
+					return
+				}
+			}
+		}
+		for _, l := range [][]byte{commands, context} {
+			if l != nil && !write(outLine{l: l}) {
+				fail()
 				return
 			}
 		}
-		for _, e := range archived {
-			if b, err := eventLine(e); err == nil && !write(b) {
-				c.close()
-				return
+		if !resumed {
+			// A resume has had them: they're the exchanges before it.
+			for _, e := range archived {
+				if b, err := eventLine(e); err == nil && !write(outLine{l: b}) {
+					fail()
+					return
+				}
 			}
 		}
-		write(info)
+		write(outLine{l: info})
+		if numbered {
+			write(outLine{l: syncedLine(v.inc, at)})
+		}
 		for {
 			if w.Flush() != nil {
-				c.close()
+				fail()
 				return
 			}
 			select {
 			case l := <-c.out:
 				if !write(l) {
-					c.close()
+					fail()
 					return
 				}
 				for more := true; more; {
