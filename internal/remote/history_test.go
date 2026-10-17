@@ -62,7 +62,7 @@ func stream(t *testing.T, url, last string) (msgs int, cut bool) {
 		if !ok {
 			continue
 		}
-		if data == `{"t":"cut"}` {
+		if strings.HasPrefix(data, `{"t":"cut"`) {
 			cut = true
 			continue
 		}
@@ -97,7 +97,7 @@ func TestHistoryTailThenAll(t *testing.T) {
 	}
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
-	if n, cut := stream(t, ts.URL+"/api/sessions/c0c0c0c0/events", "999"); n != historyMost || !cut {
+	if n, cut := stream(t, ts.URL+"/api/sessions/c0c0c0c0/events", "999"); n != tailFrames || !cut {
 		t.Errorf("tail: %d messages, cut %v", n, cut)
 	}
 	if n, cut := stream(t, ts.URL+"/api/sessions/c0c0c0c0/events?full=1", "999"); n != 1000 || cut {
