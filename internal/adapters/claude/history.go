@@ -1,8 +1,10 @@
 package claude
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -42,6 +44,106 @@ func (Adapter) History(s agent.Session, before time.Time) ([]event.Event, error)
 		return nil, err
 	}
 	defer f.Close()
+	return readHistory(f, before)
+}
+
+// HistoryTail is History of the transcript's last most bytes, from their
+// first whole line on: cut is whether that left some out.
+func (a Adapter) HistoryTail(s agent.Session, most int64) ([]event.Event, bool, error) { //nolint:gocritic // as History
+	return a.HistoryTailBefore(s, most, time.Time{})
+}
+
+// HistoryTailBefore is HistoryTail of what was written before before
+// (all of it when zero). The transcript is read back from its end, as far
+// as before and then most bytes: never from its start, for a long one.
+func (Adapter) HistoryTailBefore(s agent.Session, most int64, before time.Time) ([]event.Event, bool, error) { //nolint:gocritic // as History
+	if s.Transcript == "" {
+		return nil, false, errNoTranscript
+	}
+	f, err := os.Open(s.Transcript)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	start, end, cut, err := tailWindow(f, st.Size(), most, before)
+	if err != nil {
+		return nil, false, err
+	}
+	evs, err := readHistory(io.NewSectionReader(f, start, end-start), before)
+	return evs, cut, err
+}
+
+// tailWindow is where the whole lines of f (size long) written before
+// before end, and where the last most bytes of them start, though always
+// with one line: lines are taken as written in time order. cut is whether
+// there are lines before start.
+func tailWindow(f io.ReaderAt, size, most int64, before time.Time) (start, end int64, cut bool, err error) {
+	end = size
+	if !before.IsZero() {
+		end = 0
+		err = linesBack(f, size, func(ls int64, line []byte) bool {
+			var l struct {
+				Timestamp time.Time `json:"timestamp"`
+			}
+			if jsonx.Unmarshal(line, &l) == nil && !l.Timestamp.IsZero() && l.Timestamp.Before(before) {
+				end = min(size, ls+int64(len(line))+1)
+				return false
+			}
+			return true
+		})
+		if err != nil {
+			return 0, 0, false, err
+		}
+	}
+	start = end
+	err = linesBack(f, end, func(ls int64, _ []byte) bool {
+		if start < end && end-ls > most {
+			cut = true
+			return false
+		}
+		start = ls
+		return true
+	})
+	return start, end, cut, err
+}
+
+// linesBack calls each with f's lines that end by end, newest first, and
+// where each starts, until each says stop. It holds a line at a time.
+func linesBack(f io.ReaderAt, end int64, each func(start int64, line []byte) bool) error {
+	const chunk = 64 << 10
+	off, buf := end, []byte(nil) // buf is f[off:end]
+	for end > 0 {
+		var ls int64
+		for {
+			if i := bytes.LastIndexByte(buf[:max(0, end-1-off)], '\n'); i >= 0 {
+				ls = off + int64(i) + 1
+				break
+			}
+			if off == 0 {
+				break
+			}
+			n := min(chunk, off)
+			next := make([]byte, n+int64(len(buf)))
+			if _, err := f.ReadAt(next[:n], off-n); err != nil && err != io.EOF {
+				return err
+			}
+			copy(next[n:], buf)
+			buf, off = next, off-n
+		}
+		if !each(ls, bytes.TrimSuffix(buf[ls-off:end-off], []byte{'\n'})) {
+			return nil
+		}
+		buf, end = buf[:ls-off], ls
+	}
+	return nil
+}
+
+// readHistory is History read from f.
+func readHistory(f io.Reader, before time.Time) ([]event.Event, error) {
 	var (
 		out  []event.Event
 		n    headless.Neutral
@@ -139,4 +241,8 @@ func tag(s, name string) string {
 	return strings.TrimSpace(v)
 }
 
-var _ agent.HistoryReader = Adapter{}
+var (
+	_ agent.HistoryReader           = Adapter{}
+	_ agent.TailReader              = Adapter{}
+	_ agent.HistoryTailBeforeReader = Adapter{}
+)
