@@ -106,6 +106,7 @@ func (s *Server) Handler() http.Handler {
 	api.HandleFunc("POST /api/sessions", s.start)
 	api.HandleFunc("GET /api/sessions/stream", s.sessionsStream)
 	api.HandleFunc("GET /api/sessions/{id}/events", s.events)
+	api.HandleFunc("GET /api/sessions/{id}/history", s.history)
 	api.HandleFunc("POST /api/sessions/{id}/op", s.op)
 	api.HandleFunc("POST /api/git", s.git)
 	api.HandleFunc("GET /api/others", s.others)
@@ -563,13 +564,58 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	var shown time.Time // the info the transcript was shown with
+	a := newAt(r.URL.Query().Get("after"))
 	for n := 0; ; n++ {
 		info, err := host.ReadInfo(id)
 		if err != nil {
 			_ = send("error", map[string]string{"Error": err.Error()})
 			return
 		}
-		if host.Alive(info.HostPID) {
+		alive := host.Alive(info.HostPID)
+		// A host from before resuming, or a stream of all of it, goes as
+		// it always has: reset and the whole replay.
+		resumes := !full && (!alive || info.Proto >= host.ResumeFrom)
+		switch {
+		case resumes && alive:
+			if c, err := host.DialAfter(id, a.after()); err == nil {
+				err := pumpAfter(ctx, c, w, fl, info, a)
+				c.Close()
+				if err != nil || ctx.Err() != nil {
+					return
+				}
+				// Gone with the client holding all it was sent: once
+				// stopped, it has only its info to add.
+				shown = time.Time{}
+				if a.synced() {
+					shown = time.Unix(1, 0)
+				}
+			}
+		case resumes && (shown.IsZero() || !info.UpdatedAt.Equal(shown)):
+			if shown.IsZero() {
+				_ = send("reset", nil)
+				_ = send("info", info)
+				if list := host.ReadCommands(id); list != nil {
+					if b, err := event.Marshal(event.Commands{List: list}); err == nil {
+						emit(b)
+					}
+				}
+				sendFileTail(info, emit)
+				// A stopped host's frames have no position: the next open
+				// starts afresh.
+				emit(syncedFrame(""))
+				a.inc, a.pos, a.fresh = "", "", false
+			} else {
+				_ = send("info", info)
+			}
+			shown = info.UpdatedAt
+			if shown.IsZero() {
+				shown = time.Unix(1, 0)
+			}
+		case resumes:
+			if n%15 == 0 && sse(w, fl, nil) != nil {
+				return
+			}
+		case alive:
 			if c, err := host.Dial(id); err == nil {
 				_ = send("reset", nil)
 				if !info.ReplayFrom.IsZero() {
@@ -582,7 +628,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 				}
 				shown = time.Time{}
 			}
-		} else if shown.IsZero() || !info.UpdatedAt.Equal(shown) {
+		case shown.IsZero() || !info.UpdatedAt.Equal(shown):
 			// ponytail: polls the info file each second while the host is down; fswait if that costs
 			_ = send("reset", nil)
 			_ = send("info", info)
@@ -596,7 +642,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			if shown.IsZero() {
 				shown = time.Unix(1, 0)
 			}
-		} else if n%15 == 0 {
+		case n%15 == 0:
 			if sse(w, fl, nil) != nil {
 				return
 			}
