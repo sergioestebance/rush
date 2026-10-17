@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,5 +39,59 @@ func TestHistoryEndsBackgroundTasks(t *testing.T) {
 	want := event.TaskDone{ID: "a66", CallID: "toolu_1", Status: "completed", OutputFile: "/o", Summary: `Agent "look" finished`}
 	if len(done) != 1 || done[0] != want {
 		t.Errorf("done = %+v", done)
+	}
+}
+
+// counted is a file that counts what's read of it.
+type counted struct {
+	f    *os.File
+	read int64
+}
+
+func (c *counted) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.f.ReadAt(p, off)
+	c.read += int64(n)
+	return n, err
+}
+
+// A tail is read back from a transcript's end: the turns before a time,
+// then its last bytes, and nothing near its start.
+func TestHistoryTailReadsFromTheEnd(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	at := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
+	var b strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&b, `{"type":"user","uuid":"u%d","message":{"role":"user","content":"q%d"},"timestamp":%q}`+"\n", i, i, at.Add(time.Duration(2*i)*time.Second).Format(time.RFC3339Nano))
+		fmt.Fprintf(&b, `{"type":"assistant","uuid":"a%d","message":{"id":"m%d","role":"assistant","content":[{"type":"text","text":"a%d %s"}]},"timestamp":%q}`+"\n", i, i, i, strings.Repeat("w", 10<<10), at.Add(time.Duration(2*i+1)*time.Second).Format(time.RFC3339Nano))
+	}
+	must(t, os.WriteFile(path, []byte(b.String()), 0o644))
+	s := agent.Session{Transcript: path}
+
+	evs, cut, err := Adapter{}.HistoryTail(s, 64<<10)
+	if err != nil || !cut || len(evs) == 0 {
+		t.Fatalf("tail: %d events, cut %v, %v", len(evs), cut, err)
+	}
+	if last := evs[len(evs)-1].(event.Message); !strings.HasPrefix(last.Parts[0].Text, "a199 ") {
+		t.Errorf("the tail ends with %.10s", last.Parts[0].Text)
+	}
+	evs, _, err = Adapter{}.HistoryTailBefore(s, 64<<10, at.Add(300*time.Second))
+	if err != nil || len(evs) == 0 {
+		t.Fatal(err)
+	}
+	if last := evs[len(evs)-1].(event.Message); !strings.HasPrefix(last.Parts[0].Text, "a149 ") {
+		t.Errorf("before turn 150 ends with %.10s", last.Parts[0].Text)
+	}
+
+	f, err := os.Open(path)
+	must(t, err)
+	defer f.Close()
+	c := &counted{f: f}
+	size := int64(b.Len())
+	start, end, cut, err := tailWindow(c, size, 64<<10, at.Add(360*time.Second))
+	if err != nil || !cut || end >= size || start >= end {
+		t.Fatalf("window %d..%d of %d, cut %v, %v", start, end, size, cut, err)
+	}
+	if c.read > size/2 {
+		t.Errorf("read %d of %d bytes for a tail", c.read, size)
 	}
 }

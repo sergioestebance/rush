@@ -11,6 +11,7 @@ import (
 	"github.com/0xdeafcafe/photon/jsonx"
 	"github.com/0xdeafcafe/rush/internal/agent"
 	"github.com/0xdeafcafe/rush/internal/agent/event"
+	"github.com/0xdeafcafe/rush/internal/convo"
 	"github.com/0xdeafcafe/rush/internal/host"
 )
 
@@ -235,6 +236,11 @@ func fileTail(info host.Info, before time.Time, skip, turns, frames, size int) (
 	}
 	s := agent.Session{ID: info.SessionID, Name: info.Name, Cwd: info.Cwd, Profile: p}
 	s.Transcript = agent.TranscriptPath(kind, p, info.Cwd, info.SessionID)
+	return sessionTail(kind, s, before, skip, turns, frames, size)
+}
+
+// sessionTail is fileTail of s, a session of kind.
+func sessionTail(kind agent.Kind, s agent.Session, before time.Time, skip, turns, frames, size int) ([][]byte, int, bool) { //nolint:gocritic // as History
 	evs, cut := readTurns(kind, s, before, skip+turns)
 	return pickTurns(evs, cut, skip, turns, frames, size)
 }
@@ -264,14 +270,19 @@ func readTurns(kind agent.Kind, s agent.Session, before time.Time, want int) ([]
 }
 
 // isUserTurn is a message that starts a turn: one you said, not one the
-// agent put in as yours.
+// agent put in as yours. Claude's transcript reader marks every user text
+// injected (the host tells what you sent, live), so there it's what
+// Claude Code's own wrappers aren't.
 func isUserTurn(ev event.Event) bool {
 	m, ok := ev.(event.Message)
-	if !ok || m.Role != "user" || m.Parent != "" || m.Injected {
+	if !ok || m.Role != "user" || m.Parent != "" {
 		return false
 	}
 	for _, p := range m.Parts {
-		if p.Kind == event.Text && strings.TrimSpace(p.Text) != "" {
+		if p.Kind != event.Text || strings.TrimSpace(p.Text) == "" {
+			continue
+		}
+		if _, _, wrapped := convo.Injected(p.Text); !m.Injected || !wrapped {
 			return true
 		}
 	}
