@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -81,6 +82,21 @@ func find(name string) (pick, bool) {
 	return pick{}, false
 }
 
+// keepProgram has a subagent of a session that runs a program of its own
+// (a client's wrapper, say) run that same program, with its environment
+// and mode: a client that locks a session in a program locks what it
+// starts too. A subagent of another kind can't run it, so is refused.
+func keepProgram(parent Config, kind agent.Kind, cfg *Config) error {
+	if parent.Binary == "" {
+		return nil
+	}
+	if agent.Migrated(parent.Kind) != kind {
+		return fmt.Errorf("this session runs a program of its own, so its subagents run it too: start a %s subagent", agentName(agent.Migrated(parent.Kind)))
+	}
+	cfg.Binary, cfg.Env = parent.Binary, slices.Clone(parent.Env)
+	return nil
+}
+
 func (sa subagents) Spawn(in agtools.SpawnInput) (string, error) {
 	if strings.TrimSpace(in.Prompt) == "" {
 		return "", errors.New("spawn_agent needs a prompt: the whole task")
@@ -103,7 +119,10 @@ func (sa subagents) Spawn(in agtools.SpawnInput) (string, error) {
 		cfg.Meta["spawnStep"] = in.Step // the call that asked: the UI draws it there
 	}
 	if agent.Migrated(parent.Kind) == p.r.k {
-		cfg.PermissionMode = or(info.PermissionMode, cfg.PermissionMode) // it works for its parent, with its trust
+		cfg.PermissionMode = or(info.PermissionMode, or(parent.PermissionMode, cfg.PermissionMode)) // it works for its parent, with its trust
+	}
+	if err := keepProgram(parent, p.r.k, &cfg); err != nil {
+		return "", err
 	}
 	if string(p.r.k) == state.LoginsKind {
 		cfg.Account = st.ActiveAccount().Profile()

@@ -66,6 +66,9 @@ type StartRequest struct {
 	Model   string `json:"model,omitempty"`
 	Effort  string `json:"effort,omitempty"`
 	Name    string `json:"name,omitempty"`
+	// Mode is the agent's permission mode, in place of the one rush's
+	// settings start it with.
+	Mode string `json:"mode,omitempty"`
 	// Resume is the session id of a past session rush didn't start (see
 	// Other): it carries on in rush, with its own agent and folder.
 	Resume string `json:"resume,omitempty"`

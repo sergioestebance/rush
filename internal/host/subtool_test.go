@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -98,6 +99,27 @@ func TestSpawnedAgentAnswers(t *testing.T) {
 	}
 	if _, err := sa.Result(agtools.ResultInput{ID: parent.ID}); err == nil {
 		t.Error("an agent it didn't start answered")
+	}
+}
+
+// A subagent of a session that runs a program of its own runs it too, with
+// its environment; one of another kind is refused, and one of a session on
+// the agent's own program is left as it was.
+func TestSpawnKeepsTheParentsProgram(t *testing.T) {
+	parent := Config{Kind: "claude", Binary: "/run/agent-1", Env: []string{"HTTPS_PROXY=http://127.0.0.1:47612"}}
+	var cfg Config
+	if err := keepProgram(parent, "claude", &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Binary != parent.Binary || !slices.Equal(cfg.Env, parent.Env) {
+		t.Errorf("child runs %q with %v", cfg.Binary, cfg.Env)
+	}
+	if err := keepProgram(parent, "codex", &Config{}); err == nil {
+		t.Error("a subagent of another kind ran outside its parent's program")
+	}
+	plain := Config{Binary: "/usr/local/bin/codex2"}
+	if err := keepProgram(Config{Kind: "claude"}, "codex", &plain); err != nil || plain.Binary != "/usr/local/bin/codex2" || plain.Env != nil {
+		t.Errorf("a plain session's subagent: %+v %v", plain, err)
 	}
 }
 
