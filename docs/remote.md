@@ -19,6 +19,12 @@ server in front of those hosts. This is the simpler plan that replaced
   - `POST /api/sessions` starts one, through `rush session start`'s own code.
     `meta` sets labels the host's info carries, so the client that started it
     can tell its own sessions apart (at most 16, none of rush's own).
+    `binary` (a full path) runs that program in place of the agent's own,
+    and `env` (names to values) adds to its environment. Serve takes them only
+    when started with `--programs DIR` (as often as needed), and the program
+    only from one of those folders; otherwise a start with either is refused
+    (403). They're for the machine's own client, which puts a wrapper there
+    that locks the agent in; no `RUSH_` variable may be set.
   - `GET /api/sessions/{id}/events` is a Server-Sent Events stream. A running
     host's lines are decoded and sent as neutral events (`{"t":…,"e":…}`),
     with the host's replay first. A host that isn't running sends its saved
