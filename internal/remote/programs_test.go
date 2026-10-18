@@ -49,6 +49,10 @@ func TestStartProgramsOnlyFromServeFolders(t *testing.T) {
 	if c := start(`{"cwd":` + q(work) + `}`); c != 200 || started == nil || started.Binary != "" || started.Env != nil {
 		t.Fatalf("plain start: %d %+v", c, started)
 	}
+	// a start names its own mode, in place of rush's settings
+	if c := start(`{"cwd":` + q(work) + `,"mode":"bypassPermissions"}`); c != 200 || started == nil || started.Mode != "bypassPermissions" {
+		t.Fatalf("mode start: %d %+v", c, started)
+	}
 
 	s.Programs = []string{run}
 	if c := start(`{"cwd":` + q(work) + `,"binary":` + q(prog) + `,"env":{"B":"2","A":"1=x"}}`); c != 200 || started == nil {
