@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -20,9 +21,11 @@ import (
 	"github.com/0xdeafcafe/rush/internal/remote"
 )
 
-const remoteUsage = `rush serve [--listen ADDR]
+const remoteUsage = `rush serve [--listen ADDR] [--programs DIR]…
         serve this machine's sessions to the web app and to rush elsewhere;
-        127.0.0.1:7878 unless remote.json or --listen says. See docs/remote.md.
+        127.0.0.1:7878 unless remote.json or --listen says. With --programs, a
+        start may run a program from DIR in place of the agent's own, and add
+        to its environment. See docs/remote.md.
   rush remote token                    this machine's serve token
   rush remote add NAME URL TOKEN       show another machine's serve here
   rush remote attach NAME              keep NAME's sessions in this machine's rush (list, view, send,
@@ -37,6 +40,14 @@ const remoteUsage = `rush serve [--listen ADDR]
 func serveCmd(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	listen := fs.String("listen", "", "")
+	var programs []string
+	fs.Func("programs", "", func(dir string) error {
+		if !filepath.IsAbs(dir) {
+			return errors.New("--programs takes a full path")
+		}
+		programs = append(programs, dir)
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -55,9 +66,10 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	srv := &remote.Server{Config: cfg, Token: tok, Push: push, Start: func(r remote.StartRequest) (host.Info, error) {
+	srv := &remote.Server{Config: cfg, Token: tok, Push: push, Programs: programs, Start: func(r remote.StartRequest) (host.Info, error) {
 		return startSession(startOpts{Cwd: r.Cwd, Kind: r.Agent, Profile: r.Profile, Prompt: r.Prompt,
-			Model: r.Model, Effort: r.Effort, Name: r.Name, SessionID: r.Resume, Resume: r.Resume != "", Meta: r.Meta})
+			Model: r.Model, Effort: r.Effort, Name: r.Name, SessionID: r.Resume, Resume: r.Resume != "", Meta: r.Meta,
+			Binary: r.Binary, Env: r.EnvList()})
 	}}
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {

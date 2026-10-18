@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -39,6 +40,11 @@ type Server struct {
 	Token  string
 	// Start starts a session as rush session start does.
 	Start func(StartRequest) (host.Info, error)
+	// Programs are the folders whose programs a start may run in place of
+	// the agent's own (serve --programs). Only with some does a start's
+	// binary or env count: the machine's owner runs serve with them for a
+	// client of its own, such as a wrapper that locks the agent in.
+	Programs []string
 	// Push sends notifications, when set up.
 	Push *Push
 
@@ -50,7 +56,8 @@ type Server struct {
 
 // StartRequest is a new session as a remote client asks for it: what the
 // web app's form offers, and nothing that reaches past the agent (its
-// binary, environment, permission mode).
+// permission mode), save a program and environment serve was told to take
+// (see Server.Programs).
 type StartRequest struct {
 	Cwd     string `json:"cwd"`
 	Agent   string `json:"agent,omitempty"`
@@ -65,6 +72,20 @@ type StartRequest struct {
 	// Meta is labels the host carries in its info, for the client that
 	// started it to know its own sessions by (an owner, a chat id).
 	Meta map[string]string `json:"meta,omitempty"`
+	// Binary is the program run in place of the agent's own, by full path,
+	// from one of serve's Programs folders.
+	Binary string `json:"binary,omitempty"`
+	// Env is added to the agent's environment, on a serve with Programs.
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// EnvList is Env as the host takes it, KEY=value, in name order.
+func (r StartRequest) EnvList() []string {
+	out := make([]string, 0, len(r.Env))
+	for _, k := range slices.Sorted(maps.Keys(r.Env)) {
+		out = append(out, k+"="+r.Env[k])
+	}
+	return out
 }
 
 // metaOK is whether labels a remote client asked for are fit to store:
@@ -312,6 +333,10 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, err.Error())
 		return
 	}
+	if err := s.allowedProgram(req); err != nil {
+		fail(w, http.StatusForbidden, err.Error())
+		return
+	}
 	if s.Start == nil {
 		fail(w, http.StatusNotImplemented, "this serve can't start sessions")
 		return
@@ -333,28 +358,68 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 // in rush's own folder (the tokens and keys serve holds), and where
 // remote.json's workspaces list some, only in them.
 func (s *Server) allowedCwd(dir string) error {
-	real := func(p string) string {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return r
-		}
-		return filepath.Clean(p)
-	}
-	in := func(p, root string) bool {
-		rel, err := filepath.Rel(real(root), real(p))
-		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-	}
-	if in(dir, state.Dir()) {
+	if within(dir, state.Dir()) {
 		return errors.New("that folder is rush's own")
 	}
 	if len(s.Config.Workspaces) == 0 {
 		return nil
 	}
 	for _, w := range s.Config.Workspaces {
-		if in(dir, w) {
+		if within(dir, w) {
 			return nil
 		}
 	}
 	return errors.New("that folder isn't one of this machine's workspaces")
+}
+
+// allowedProgram is whether a start's program and environment are ones
+// this serve takes: none at all without Programs, the program a file run
+// from one of those folders, and no variable of rush's own.
+func (s *Server) allowedProgram(req StartRequest) error {
+	if req.Binary == "" && len(req.Env) == 0 {
+		return nil
+	}
+	if len(s.Programs) == 0 {
+		return errors.New("this serve runs only the agents' own programs, with their own environment")
+	}
+	if len(req.Env) > 64 {
+		return errors.New("at most 64 environment variables")
+	}
+	for k, v := range req.Env {
+		if k == "" || strings.ContainsAny(k, "=\x00") || strings.ContainsRune(v, 0) {
+			return fmt.Errorf("the environment variable %q can't be set", k)
+		}
+		if strings.HasPrefix(k, "RUSH_") {
+			return fmt.Errorf("%s is rush's own", k)
+		}
+	}
+	if req.Binary == "" {
+		return nil
+	}
+	if !filepath.IsAbs(req.Binary) {
+		return errors.New("the program must be a full path")
+	}
+	if st, err := os.Stat(req.Binary); err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("%s isn't a program on this machine", req.Binary)
+	}
+	for _, d := range s.Programs {
+		if within(req.Binary, d) {
+			return nil
+		}
+	}
+	return errors.New("that program isn't in one of this serve's program folders")
+}
+
+// within is whether p is root or under it, each with its links followed.
+func within(p, root string) bool {
+	real := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	rel, err := filepath.Rel(real(root), real(p))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // validID is a session id with a session folder behind it.
