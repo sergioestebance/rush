@@ -265,7 +265,7 @@ func TestOlderTurnsComeFromTheHistoryRoute(t *testing.T) {
 func coldTail(t *testing.T, kind agent.Kind, path string) {
 	t.Helper()
 	before := time.Now()
-	frames, n, more := sessionTail(kind, agent.Session{Transcript: path}, before, 0, tailTurns, tailFrames, tailBytes)
+	frames, n, _, more := sessionTail(kind, agent.Session{Transcript: path}, before, 0, 0, tailTurns, tailFrames, tailBytes)
 	if !more || n != tailTurns {
 		t.Fatalf("%d turns, more %v", n, more)
 	}
@@ -331,9 +331,33 @@ func TestABigTurnKeepsItsNewestPart(t *testing.T) {
 	for i := range 500 {
 		evs = append(evs, event.Message{Role: "assistant", Parts: []event.Part{{Kind: event.Text, Text: fmt.Sprint(i)}}})
 	}
-	frames, n, more := pickTurns(evs, false, 0, tailTurns, tailFrames, tailBytes)
-	if len(frames) != tailFrames || n != 1 || !more || !strings.Contains(string(frames[len(frames)-1]), `"499"`) {
-		t.Fatalf("%d frames, %d turns, more %v", len(frames), n, more)
+	frames, n, part, more := pickTurns(evs, false, 0, 0, tailTurns, tailFrames, tailBytes)
+	if len(frames) != tailFrames || n != 0 || part != tailFrames || !more || !strings.Contains(string(frames[len(frames)-1]), `"499"`) {
+		t.Fatalf("%d frames, %d turns, %d of the next, more %v", len(frames), n, part, more)
+	}
+	// The next page goes on from the oldest sent, to the turn's start.
+	frames, n, part, more = pickTurns(evs, false, n, part, tailTurns, tailFrames, tailBytes)
+	if len(frames) != 201 || n != 1 || part != 0 || more || !strings.Contains(string(frames[0]), `"go"`) || !strings.Contains(string(frames[200]), `"199"`) {
+		t.Fatalf("the rest: %d frames, %d turns, %d of the next, more %v", len(frames), n, part, more)
+	}
+}
+
+// A cursor names the newest events of a turn already given, when there are.
+func TestACursorReadsItsPartOfATurn(t *testing.T) {
+	at := time.UnixMilli(1700000000000)
+	for in, want := range map[string][2]int{cursor(at, 3, 0): {3, 0}, cursor(at, 2, 40): {2, 40}} {
+		b, n, part, ok := parseCursor(in)
+		if !ok || !b.Equal(at) || n != want[0] || part != want[1] {
+			t.Errorf("%q: %v %d %d %v", in, b, n, part, ok)
+		}
+	}
+	if c := cursor(at, 3, 0); c != "1700000000000.3" {
+		t.Errorf("a cursor of whole turns is %q", c)
+	}
+	for _, in := range []string{"1700000000000.1.-1", "1700000000000.1.x", "1700000000000.1.2.3"} {
+		if _, _, _, ok := parseCursor(in); ok {
+			t.Errorf("%q read", in)
+		}
 	}
 }
 
@@ -483,7 +507,7 @@ func TestOlderTurnsComeFromTheHistoryRouteInWholeTurns(t *testing.T) {
 	var seen []string
 	skip := 0
 	for {
-		frames, n, more := pickTurns(evs, false, skip, tailTurns, tailFrames, tailBytes)
+		frames, n, _, more := pickTurns(evs, false, skip, 0, tailTurns, tailFrames, tailBytes)
 		var ws []wire
 		for _, b := range frames {
 			var w wire
@@ -535,11 +559,11 @@ func (deepAgent) HistoryTailBefore(_ agent.Session, most int64, _ time.Time) ([]
 // A page deeper than any window yet read keeps reading: it never says it
 // reached the start when it didn't.
 func TestOlderTurnsComeFromTheHistoryRouteHoweverDeep(t *testing.T) {
-	frames, n, more := sessionTail("deep", agent.Session{}, time.Now(), 180, tailTurns, tailFrames, tailBytes)
+	frames, n, _, more := sessionTail("deep", agent.Session{}, time.Now(), 180, 0, tailTurns, tailFrames, tailBytes)
 	if n != 10 || !more || !strings.Contains(string(frames[0]), `"q10"`) {
 		t.Fatalf("%d turns, more %v", n, more)
 	}
-	if _, n, more = sessionTail("deep", agent.Session{}, time.Now(), 190, tailTurns, tailFrames, tailBytes); n != 10 || more {
+	if _, n, _, more = sessionTail("deep", agent.Session{}, time.Now(), 190, 0, tailTurns, tailFrames, tailBytes); n != 10 || more {
 		t.Fatalf("the oldest page: %d turns, more %v", n, more)
 	}
 }

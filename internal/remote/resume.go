@@ -129,11 +129,11 @@ func topUp(info host.Info, r host.Reset, emit func([]byte) error) error {
 		before = time.Now()
 	}
 	if !r.File || r.Turns >= tailTurns || r.Frames >= tailFrames || r.Bytes >= tailBytes {
-		return emit(cutFrame(before, 0))
+		return emit(cutFrame(before, 0, 0))
 	}
-	frames, n, more := fileTail(info, before, 0, tailTurns-r.Turns, tailFrames-r.Frames, tailBytes-r.Bytes)
+	frames, n, part, more := fileTail(info, before, 0, 0, tailTurns-r.Turns, tailFrames-r.Frames, tailBytes-r.Bytes)
 	if more {
-		if err := emit(cutFrame(before, n)); err != nil {
+		if err := emit(cutFrame(before, n, part)); err != nil {
 			return err
 		}
 	}
@@ -152,9 +152,9 @@ func sendFileTail(info host.Info, before time.Time, emit func([]byte)) {
 	if before.IsZero() {
 		before = time.Now()
 	}
-	frames, n, more := fileTail(info, before, 0, tailTurns, tailFrames, tailBytes)
+	frames, n, part, more := fileTail(info, before, 0, 0, tailTurns, tailFrames, tailBytes)
 	if more {
-		emit(cutFrame(before, n))
+		emit(cutFrame(before, n, part))
 	}
 	for _, b := range frames {
 		emit(b)
@@ -173,25 +173,36 @@ func syncedFrame(position string) []byte {
 	return b
 }
 
-// A cursor is the turns of a transcript written before a time, and how
-// many of the newest of them the client has: "<unix ms>.<turns>". The
-// transcript only grows after the time, so the turns before it hold still.
-func cursor(before time.Time, skip int) string {
-	return strconv.FormatInt(before.UnixMilli(), 10) + "." + strconv.Itoa(skip)
+// A cursor is the turns of a transcript written before a time, how many
+// of the newest of them the client has, and how many of the newest events
+// of the turn before those, when it has part of one: "<unix ms>.<turns>"
+// or "<unix ms>.<turns>.<events>". The transcript only grows after the
+// time, so what's before it holds still.
+func cursor(before time.Time, skip, part int) string {
+	c := strconv.FormatInt(before.UnixMilli(), 10) + "." + strconv.Itoa(skip)
+	if part > 0 {
+		c += "." + strconv.Itoa(part)
+	}
+	return c
 }
 
-func parseCursor(s string) (time.Time, int, bool) {
+func parseCursor(s string) (before time.Time, skip, part int, ok bool) {
 	t, k, ok := strings.Cut(s, ".")
+	k, p, inTurn := strings.Cut(k, ".")
 	ms, err1 := strconv.ParseInt(t, 10, 64)
 	n, err2 := strconv.Atoi(k)
-	if !ok || err1 != nil || err2 != nil || ms <= 0 || n < 0 {
-		return time.Time{}, 0, false
+	var err3 error
+	if inTurn {
+		part, err3 = strconv.Atoi(p)
 	}
-	return time.UnixMilli(ms), n, true
+	if !ok || err1 != nil || err2 != nil || err3 != nil || ms <= 0 || n < 0 || part < 0 {
+		return time.Time{}, 0, 0, false
+	}
+	return time.UnixMilli(ms), n, part, true
 }
 
-func cutFrame(before time.Time, skip int) []byte {
-	b, _ := jsonx.Marshal(frame{"cut", map[string]string{"before": cursor(before, skip)}})
+func cutFrame(before time.Time, skip, part int) []byte {
+	b, _ := jsonx.Marshal(frame{"cut", map[string]string{"before": cursor(before, skip, part)}})
 	return b
 }
 
@@ -204,7 +215,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "no such session")
 		return
 	}
-	before, skip, ok := parseCursor(r.URL.Query().Get("before"))
+	before, skip, part, ok := parseCursor(r.URL.Query().Get("before"))
 	if !ok {
 		fail(w, http.StatusBadRequest, "no such place in the history")
 		return
@@ -218,23 +229,24 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-store")
-	frames, n, more := fileTail(info, before, skip, tailTurns, tailFrames, tailBytes)
+	frames, n, part, more := fileTail(info, before, skip, part, tailTurns, tailFrames, tailBytes)
 	for _, b := range frames {
 		if sse(w, fl, b) != nil {
 			return
 		}
 	}
 	if more {
-		_ = sse(w, fl, cutFrame(before, skip+n))
+		_ = sse(w, fl, cutFrame(before, skip+n, part))
 	}
 }
 
 // fileTail is the frames of the turns of info's transcript written before
-// before, leaving out its newest skip turns: the newest turns of them,
-// within frames frames and size bytes, a bigger turn keeping its newest
-// part. It says how many turns it gave, and whether there are more.
-// It reads the transcript from its end where the agent can.
-func fileTail(info host.Info, before time.Time, skip, turns, frames, size int) (out [][]byte, n int, more bool) {
+// before, leaving out its newest skip turns and part events of the turn
+// before them: the newest turns of them, within frames frames and size
+// bytes, a bigger turn its newest part. It says how many turns it gave
+// whole, how many events of the next it has given, and whether there are
+// more. It reads the transcript from its end where the agent can.
+func fileTail(info host.Info, before time.Time, skip, part, turns, frames, size int) (out [][]byte, n, given int, more bool) {
 	kind := agent.Migrated(info.Kind)
 	p := agent.Profile{Kind: kind}
 	if cfg, err := host.ReadConfig(info.ID); err == nil {
@@ -242,13 +254,13 @@ func fileTail(info host.Info, before time.Time, skip, turns, frames, size int) (
 	}
 	s := agent.Session{ID: info.SessionID, Name: info.Name, Cwd: info.Cwd, Profile: p}
 	s.Transcript = agent.TranscriptPath(kind, p, info.Cwd, info.SessionID)
-	return sessionTail(kind, s, before, skip, turns, frames, size)
+	return sessionTail(kind, s, before, skip, part, turns, frames, size)
 }
 
 // sessionTail is fileTail of s, a session of kind.
-func sessionTail(kind agent.Kind, s agent.Session, before time.Time, skip, turns, frames, size int) ([][]byte, int, bool) { //nolint:gocritic // as History
+func sessionTail(kind agent.Kind, s agent.Session, before time.Time, skip, part, turns, frames, size int) ([][]byte, int, int, bool) { //nolint:gocritic // as History
 	evs, cut := readTurns(kind, s, before, skip+turns)
-	return pickTurns(evs, cut, skip, turns, frames, size)
+	return pickTurns(evs, cut, skip, part, turns, frames, size)
 }
 
 // readTurns reads the end of s's transcript before before, at least want
@@ -310,8 +322,9 @@ func userTurns(evs []event.Event) int {
 // pickTurns is fileTail's choice from evs, a transcript's end (cut: not
 // all of it). Turns go whole, newest first, while they fit: n counts only
 // those sent, so the next cursor reaches the rest. Only a newest turn too
-// big on its own is sent in part, its newest; its start is lost.
-func pickTurns(evs []event.Event, cut bool, skip, turns, frames, size int) (out [][]byte, n int, more bool) {
+// big on its own is sent in part, its newest, and given says how much of
+// it has gone, so the next cursor goes on to its start.
+func pickTurns(evs []event.Event, cut bool, skip, part, turns, frames, size int) (out [][]byte, n, given int, more bool) {
 	var starts []int
 	for i, ev := range evs {
 		if isUserTurn(ev) {
@@ -319,23 +332,24 @@ func pickTurns(evs []event.Event, cut bool, skip, turns, frames, size int) (out 
 		}
 	}
 	if skip > len(starts) {
-		return nil, 0, cut
+		return nil, 0, 0, cut
 	}
 	end, bytes := len(evs), 0
 	if skip > 0 {
 		end = starts[len(starts)-skip]
 	}
+	end = max(0, end-part)
 	// Turn k is evs[starts[k]:end]; k -1 is what comes before the first,
 	// part of a turn whose start wasn't read when cut.
 	for k := len(starts) - 1 - skip; k >= -1; k-- {
 		if n == turns {
-			return out, n, k >= 0 || cut || end > 0
+			return out, n, 0, k >= 0 || cut || end > 0
 		}
 		lo := 0
 		if k >= 0 {
-			lo = starts[k]
+			lo = min(starts[k], end)
 		} else if cut {
-			return out, n, true
+			return out, n, 0, true
 		}
 		var seg [][]byte
 		sb := 0
@@ -351,16 +365,14 @@ func pickTurns(evs []event.Event, cut bool, skip, turns, frames, size int) (out 
 				for sb = len(seg[i]); i > 0 && len(seg)-i < frames && sb+len(seg[i-1]) <= size; i-- {
 					sb += len(seg[i-1])
 				}
-				// It counts as given, even before any turn: asked again,
-				// it would come the same.
-				return seg[i:], 1, true
+				return seg[i:], 0, part + len(seg) - i, true
 			}
-			return out, n, true
+			return out, n, 0, true
 		}
-		out, bytes, end = append(seg, out...), bytes+sb, lo
+		out, bytes, end, part = append(seg, out...), bytes+sb, lo, 0
 		if k >= 0 {
 			n++
 		}
 	}
-	return out, n, false
+	return out, n, 0, false
 }
