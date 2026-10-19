@@ -528,6 +528,38 @@ func TestAColdChatGetsOnlyItsTailFromTheRingInWholeTurns(t *testing.T) {
 	}
 }
 
+// A turn too big for the tail on its own sends its newest part from a time
+// mark, and its cursor is that mark: what came before it, the turn's start
+// too, is the history route's to send.
+func TestABigTurnLeavesItsStartToTheHistory(t *testing.T) {
+	s := resumeHost(t)
+	put(s, echoLine("go"))
+	for j := range 500 {
+		if j%47 == 46 {
+			s.mu.Lock()
+			s.stamped = time.Time{} // a pause: a time mark before it
+			s.mu.Unlock()
+		}
+		put(s, msgLine(fmt.Sprint(j)))
+	}
+	r, got := resetOf(t, s)
+	if !r.Older || r.File || r.Turns != 1 || r.Frames > tailFrames {
+		t.Fatalf("reset %+v", r)
+	}
+	first, _ := Decode(got[0])
+	stamp, ok := first.(Stamp)
+	if !ok || !stamp.At.Equal(r.Before) {
+		t.Fatalf("the tail starts with %T, its cursor %v", first, r.Before)
+	}
+	for _, l := range got {
+		if ev, _ := Decode(l); ev != nil {
+			if m, ok := ev.(Sent); ok {
+				t.Fatalf("the turn's start was sent: %q", m.Text)
+			}
+		}
+	}
+}
+
 // A host started again, or rewound, on a conversation with a transcript
 // leaves what came before that to the transcript, as it does a trim.
 func TestAColdChatGetsOnlyItsTailAfterAWake(t *testing.T) {

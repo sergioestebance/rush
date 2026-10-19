@@ -164,7 +164,8 @@ func (v *view) tail(w io.Writer, enc *encoder) (position, time.Time, error) {
 	}
 	// A turn starts at its echo, with the time mark before it: whole turns
 	// go, newest first, while they fit, so the cursor reaches the rest.
-	// Only a newest turn too big on its own goes in part, its newest.
+	// Only a newest turn too big on its own goes in part, its newest, from
+	// a time mark: the cursor, a time, then reaches the turn's start too.
 	var begins []int
 	for i, l := range v.ring {
 		if isEcho(l) {
@@ -193,7 +194,14 @@ func (v *view) tail(w io.Writer, enc *encoder) (position, time.Time, error) {
 					start--
 					frames, size = frames+costs[start].frames, size+costs[start].bytes
 				}
-				if from = lo; k >= 0 {
+				from = lo
+				if m := v.markFrom(start); m > lo {
+					for ; start < m; start++ {
+						frames, size = frames-costs[start].frames, size-costs[start].bytes
+					}
+					from = m
+				}
+				if k >= 0 {
 					turns = 1
 				}
 			}
@@ -281,6 +289,17 @@ func (v *view) markBefore(i int) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// markFrom is the index of the ring's first time mark at or after i, short
+// of its last line, or -1 when there's none.
+func (v *view) markFrom(i int) int {
+	for ; i < len(v.ring)-1; i++ {
+		if isTimeMark(v.ring[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 func isTimeMark(l []byte) bool {
