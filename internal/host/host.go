@@ -1725,6 +1725,18 @@ func (s *server) do(o op) error {
 		defer s.api.mutation.Unlock()
 	}
 	if o.Op == "send" {
+		// A send that names a mode goes in that mode, or not at all: one op,
+		// so a client waking a stopped session never changes it first.
+		if o.Mode != "" {
+			s.mu.Lock()
+			if s.info.Sleeping {
+				s.mu.Unlock()
+				return errors.New("session is sleeping; reconnect before sending")
+			}
+			if err := s.setMode(o.Mode); err != nil {
+				return err
+			}
+		}
 		var err error
 		if o.Guide {
 			err = s.guideExchange(o.Text, o.Images, o.Exchange)
@@ -1849,39 +1861,7 @@ func (s *server) do(o op) error {
 		s.mu.Unlock()
 		return err
 	case "mode":
-		known, selectable := false, false
-		if len(s.info.PermissionModes) > 0 {
-			selectable = true
-			for _, v := range s.info.PermissionModes {
-				known = known || v.ID == o.Mode
-			}
-		} else if ch, ok := agent.ChoicesOf(agent.Kind(s.cfg.Kind)); ok && len(ch.Modes) > 0 {
-			selectable = true
-			for _, v := range ch.Modes {
-				known = known || v.ID == o.Mode
-			}
-		}
-		if (selectable && !known) || (!selectable && conn == nil) {
-			s.mu.Unlock()
-			return fmt.Errorf("permission mode %q is not offered by this harness", o.Mode)
-		}
-		// Applying permissions can fail. Never advertise or persist an unaccepted
-		// mode, and never restart or drain queued messages to change it.
-		s.mu.Unlock()
-		if conn != nil {
-			if err := conn.SetMode(o.Mode); err != nil {
-				return err
-			}
-		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.conn != conn {
-			return errors.New("session changed while applying permissions; check the current mode")
-		}
-		s.cfg.PermissionMode, s.info.PermissionMode = o.Mode, o.Mode
-		s.saveConfig()
-		s.publish()
-		return nil
+		return s.setMode(o.Mode)
 	case "model":
 		wasCfg, wasInfo = s.cfg.Model, s.info.Model
 		s.cfg.Model = o.Model
@@ -2290,6 +2270,45 @@ func (s *server) serve(nc net.Conn) {
 			return
 		}
 	}
+}
+
+// setMode switches the agent's permission mode. Called with mu held; it
+// returns with mu released.
+func (s *server) setMode(mode string) error {
+	conn := s.conn
+	known, selectable := false, false
+	if len(s.info.PermissionModes) > 0 {
+		selectable = true
+		for _, v := range s.info.PermissionModes {
+			known = known || v.ID == mode
+		}
+	} else if ch, ok := agent.ChoicesOf(agent.Kind(s.cfg.Kind)); ok && len(ch.Modes) > 0 {
+		selectable = true
+		for _, v := range ch.Modes {
+			known = known || v.ID == mode
+		}
+	}
+	if (selectable && !known) || (!selectable && conn == nil) {
+		s.mu.Unlock()
+		return fmt.Errorf("permission mode %q is not offered by this harness", mode)
+	}
+	// Applying permissions can fail. Never advertise or persist an unaccepted
+	// mode, and never restart or drain queued messages to change it.
+	s.mu.Unlock()
+	if conn != nil {
+		if err := conn.SetMode(mode); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conn != conn {
+		return errors.New("session changed while applying permissions; check the current mode")
+	}
+	s.cfg.PermissionMode, s.info.PermissionMode = mode, mode
+	s.saveConfig()
+	s.publish()
+	return nil
 }
 
 // toolSummary picks the argument that says what a tool call does.

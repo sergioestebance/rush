@@ -512,7 +512,8 @@ func savePictures(id string, ps []Picture) ([]string, error) {
 }
 
 // op sends one op to a session's host. A send wakes a sleeping one, as
-// rush session send does; anything else needs it running. What the host
+// rush session send does, and goes in the mode it names; anything else
+// needs it running. What the host
 // makes of it comes back on the events stream.
 func (s *Server) op(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
