@@ -146,9 +146,10 @@ func (v *view) resume(enc *encoder, b *bytes.Buffer, p position) (position, bool
 }
 
 // tail writes a reset, then the ring's newest tailTurns user turns, bound
-// by tailFrames and tailBytes: a bigger turn keeps its newest part. The
-// lines before them are read but not sent. It says when what it left out
-// ends, zero when it left nothing.
+// by tailFrames and tailBytes: a bigger turn keeps its newest part, from
+// a time mark, and the reset's cursor is that mark. The lines before them
+// are read but not sent. It says when the oldest turn it sent, whole or
+// not, begins, zero when it left nothing out.
 func (v *view) tail(w io.Writer, enc *encoder) (position, time.Time, error) {
 	// First what each line makes, read through a converter of its own.
 	type cost struct{ frames, bytes int }
@@ -188,10 +189,17 @@ func (v *view) tail(w io.Writer, enc *encoder) (position, time.Time, error) {
 		}
 		if frames+f > tailFrames || size+b > tailBytes {
 			if turns == 0 {
-				// Its newest lines, always one.
+				// Its newest lines, always one, from a time mark: the
+				// cursor is that mark, so the history has what's before it,
+				// the turn's start too.
 				for start > lo && (start == len(v.ring) || frames+costs[start-1].frames <= tailFrames && size+costs[start-1].bytes <= tailBytes) {
 					start--
 					frames, size = frames+costs[start].frames, size+costs[start].bytes
+				}
+				start = v.markFrom(start, lo)
+				frames, size = 0, 0
+				for _, c := range costs[start:] {
+					frames, size = frames+c.frames, size+c.bytes
 				}
 				if from = lo; k >= 0 {
 					turns = 1
@@ -212,6 +220,8 @@ func (v *view) tail(w io.Writer, enc *encoder) (position, time.Time, error) {
 	file := start == 0 && !v.from.IsZero()
 	r := resetLine{Type: typeReset, Inc: v.inc, Turns: turns, Frames: frames, Bytes: size,
 		Older: start > 0 || file, File: file}
+	// The cursor is where the oldest turn sent begins, or where its part
+	// sent does; what's left out of the exchanges ends where it begins.
 	var cursor time.Time
 	if file {
 		cursor = v.from
@@ -220,8 +230,14 @@ func (v *view) tail(w io.Writer, enc *encoder) (position, time.Time, error) {
 	} else {
 		cursor = v.from
 	}
-	if !cursor.IsZero() {
-		r.Before = cursor.UnixMilli()
+	before := cursor
+	if !file && start > from {
+		if t := v.markBefore(start); !t.IsZero() {
+			before = t
+		}
+	}
+	if !before.IsZero() {
+		r.Before = before.UnixMilli()
 	}
 	if !r.Older {
 		cursor = time.Time{}
@@ -265,6 +281,23 @@ func tailExchanges(es []event.Exchange, resumed bool, from time.Time) []event.Ex
 		i, size = i-1, size+len(b)
 	}
 	return es[i:]
+}
+
+// markFrom is the first time mark at or after line i of the ring, else the
+// last one before it and from lo: a part of a turn sent starts at one.
+// When there's neither, it's i.
+func (v *view) markFrom(i, lo int) int {
+	for j := i; j < len(v.ring); j++ {
+		if isTimeMark(v.ring[j]) {
+			return j
+		}
+	}
+	for j := i - 1; j >= lo; j-- {
+		if isTimeMark(v.ring[j]) {
+			return j
+		}
+	}
+	return i
 }
 
 // markBefore is the time of the last time mark at or before line i of the
