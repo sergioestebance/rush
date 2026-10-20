@@ -104,3 +104,40 @@ func TestHistoryTailThenAll(t *testing.T) {
 		t.Errorf("full: %d messages, cut %v", n, cut)
 	}
 }
+
+// movedAgent is countAgent whose transcript stays in the folder the
+// session started in, "started" beside cwd, after it moves.
+type movedAgent struct{ countAgent }
+
+func init() { agent.Register(movedAgent{}) }
+
+func (movedAgent) Kind() agent.Kind { return "moved" }
+func (movedAgent) FindTranscript(_ agent.Profile, cwd, sid string) string {
+	return filepath.Join(filepath.Dir(cwd), "started", sid)
+}
+func (movedAgent) TranscriptsDir(agent.Profile) string { return "" }
+
+func TestHistoryOfASessionThatMovedFolder(t *testing.T) {
+	s := newServer(t)
+	root := t.TempDir()
+	cwd := filepath.Join(root, "now")
+	if err := os.MkdirAll(filepath.Join(root, "started"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "started", "sid"), []byte("3"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(host.Root(), "d0d0d0d0")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := jsonx.Marshal(host.Info{ID: "d0d0d0d0", SessionID: "sid", Kind: "moved", Cwd: cwd, State: "stopped", UpdatedAt: time.Now()})
+	if err := os.WriteFile(filepath.Join(dir, "info.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	if n, _ := stream(t, ts.URL+"/api/sessions/d0d0d0d0/events", "2"); n != 3 {
+		t.Errorf("%d messages, want 3", n)
+	}
+}

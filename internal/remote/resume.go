@@ -257,7 +257,7 @@ func fileTail(info host.Info, before time.Time, at place, turns, frames, size in
 		p.Dir = cfg.Account.Dir
 	}
 	s := agent.Session{ID: info.SessionID, Name: info.Name, Cwd: info.Cwd, Profile: p}
-	s.Transcript = agent.TranscriptPath(kind, p, info.Cwd, info.SessionID)
+	s.Transcript = agent.FindTranscript(kind, p, info.Cwd, info.SessionID)
 	return sessionTail(kind, s, before, at, turns, frames, size)
 }
 
