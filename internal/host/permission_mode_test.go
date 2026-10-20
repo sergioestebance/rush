@@ -54,3 +54,32 @@ func TestPermissionModeCommitsOnlyAfterAcceptance(t *testing.T) {
 		t.Fatal("unknown mode accepted")
 	}
 }
+
+// A send that names a mode goes in it: the mode first, then the message,
+// as one op. A mode the agent refuses keeps the message back too.
+func TestSendNamesItsMode(t *testing.T) {
+	setup(t)
+	c := &permissionConn{}
+	s := &server{cfg: Config{ID: "sendmode", Kind: "fake", PermissionMode: "ask"}, conn: c, clients: map[*conn]struct{}{},
+		info: Info{PermissionMode: "ask", State: "working", PermissionModes: []event.PermissionMode{{ID: "ask"}, {ID: "bypass"}}}}
+	if err := s.do(op{Op: "send", Text: "go on", Mode: "bypass"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.mode != "bypass" || s.cfg.PermissionMode != "bypass" || len(s.info.Queue) != 1 {
+		t.Fatalf("mode %q cfg %q queue %q", c.mode, s.cfg.PermissionMode, s.info.Queue)
+	}
+	if err := s.do(op{Op: "send", Text: "not this", Mode: "invented"}); err == nil {
+		t.Fatal("unknown mode accepted")
+	}
+	c.fail = true
+	if err := s.do(op{Op: "send", Text: "nor this", Mode: "ask"}); err == nil {
+		t.Fatal("refused mode accepted")
+	}
+	if len(s.info.Queue) != 1 || s.cfg.PermissionMode != "bypass" {
+		t.Fatalf("a refused mode still sent: queue %q mode %q", s.info.Queue, s.cfg.PermissionMode)
+	}
+	s.info.Sleeping = true
+	if err := s.do(op{Op: "send", Text: "asleep", Mode: "ask"}); err == nil {
+		t.Fatal("a sleeping session took a mode")
+	}
+}

@@ -202,6 +202,7 @@ func TestWebControlsReachTheHost(t *testing.T) {
 		want       map[string]any
 	}{
 		{"send", `{"op":"send","text":"hello"}`, map[string]any{"op": "send", "text": "hello"}},
+		{"send in a mode", `{"op":"send","text":"go","mode":"bypass"}`, map[string]any{"op": "send", "text": "go", "mode": "bypass"}},
 		{"steer", `{"op":"send","text":"turn left","guide":true}`, map[string]any{"op": "send", "text": "turn left", "guide": true}},
 		{"stop the turn", `{"op":"interrupt"}`, map[string]any{"op": "interrupt"}},
 		{"approve", `{"op":"allow","id":"ap1"}`, map[string]any{"op": "allow", "id": "ap1"}},
