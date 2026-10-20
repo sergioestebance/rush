@@ -265,9 +265,9 @@ func TestOlderTurnsComeFromTheHistoryRoute(t *testing.T) {
 func coldTail(t *testing.T, kind agent.Kind, path string) {
 	t.Helper()
 	before := time.Now()
-	frames, n, more := sessionTail(kind, agent.Session{Transcript: path}, before, 0, tailTurns, tailFrames, tailBytes)
-	if !more || n != tailTurns {
-		t.Fatalf("%d turns, more %v", n, more)
+	frames, next, more := sessionTail(kind, agent.Session{Transcript: path}, before, place{}, tailTurns, tailFrames, tailBytes)
+	if !more || next != (place{skip: tailTurns}) {
+		t.Fatalf("%+v given, more %v", next, more)
 	}
 	size := 0
 	var ws []wire
@@ -331,9 +331,9 @@ func TestABigTurnKeepsItsNewestPart(t *testing.T) {
 	for i := range 500 {
 		evs = append(evs, event.Message{Role: "assistant", Parts: []event.Part{{Kind: event.Text, Text: fmt.Sprint(i)}}})
 	}
-	frames, n, more := pickTurns(evs, false, 0, tailTurns, tailFrames, tailBytes)
-	if len(frames) != tailFrames || n != 1 || !more || !strings.Contains(string(frames[len(frames)-1]), `"499"`) {
-		t.Fatalf("%d frames, %d turns, more %v", len(frames), n, more)
+	frames, next, more := pickTurns(evs, false, place{}, tailTurns, tailFrames, tailBytes)
+	if len(frames) != tailFrames || next != (place{part: tailFrames}) || !more || !strings.Contains(string(frames[len(frames)-1]), `"499"`) {
+		t.Fatalf("%d frames, %+v given, more %v", len(frames), next, more)
 	}
 }
 
@@ -483,7 +483,8 @@ func TestOlderTurnsComeFromTheHistoryRouteInWholeTurns(t *testing.T) {
 	var seen []string
 	skip := 0
 	for {
-		frames, n, more := pickTurns(evs, false, skip, tailTurns, tailFrames, tailBytes)
+		frames, next, more := pickTurns(evs, false, place{skip: skip}, tailTurns, tailFrames, tailBytes)
+		n := next.skip - skip
 		var ws []wire
 		for _, b := range frames {
 			var w wire
@@ -535,12 +536,12 @@ func (deepAgent) HistoryTailBefore(_ agent.Session, most int64, _ time.Time) ([]
 // A page deeper than any window yet read keeps reading: it never says it
 // reached the start when it didn't.
 func TestOlderTurnsComeFromTheHistoryRouteHoweverDeep(t *testing.T) {
-	frames, n, more := sessionTail("deep", agent.Session{}, time.Now(), 180, tailTurns, tailFrames, tailBytes)
-	if n != 10 || !more || !strings.Contains(string(frames[0]), `"q10"`) {
-		t.Fatalf("%d turns, more %v", n, more)
+	frames, next, more := sessionTail("deep", agent.Session{}, time.Now(), place{skip: 180}, tailTurns, tailFrames, tailBytes)
+	if next.skip != 190 || !more || !strings.Contains(string(frames[0]), `"q10"`) {
+		t.Fatalf("%+v given, more %v", next, more)
 	}
-	if _, n, more = sessionTail("deep", agent.Session{}, time.Now(), 190, tailTurns, tailFrames, tailBytes); n != 10 || more {
-		t.Fatalf("the oldest page: %d turns, more %v", n, more)
+	if _, next, more = sessionTail("deep", agent.Session{}, time.Now(), place{skip: 190}, tailTurns, tailFrames, tailBytes); next.skip != 200 || more {
+		t.Fatalf("the oldest page: %+v given, more %v", next, more)
 	}
 }
 
@@ -566,5 +567,98 @@ func TestAStoppedHostSendsAChangedInfoAloneOnceSynced(t *testing.T) {
 	}
 	if field(t, got[len(got)-1], "position") != "" {
 		t.Errorf("synced %s", got[len(got)-1].E)
+	}
+}
+
+// A host that sent a big turn in part says a cursor inside it: the
+// history route gives back the rest of it, its prompt last, each once,
+// though that rest is bigger than a page.
+func TestABigTurnsStartComesFromTheHistoryRoute(t *testing.T) {
+	for _, small := range []bool{false, true} {
+		s := runningServer(t)
+		id := "d6d6d6d6"
+		if small {
+			id = "d7d7d7d7"
+		}
+		at := time.Now().Add(-time.Hour)
+		cut := at.Add(time.Second + 350*time.Millisecond) // the host sent answer 350 on
+		resumeHost(t, id, func(n int, after string) []string {
+			if n > 0 {
+				return nil
+			}
+			return []string{fmt.Sprintf(`{"before":%d,"bytes":100,"frames":70,"inc":"inc","older":true,"turns":1,"type":"agtop_reset"}`, cut.UnixMilli()),
+				evAt(t, "answer 350", "5.0"), `{"position":"inc:5.0","type":"agtop_synced"}`}
+		})
+		cwd := t.TempDir()
+		var b strings.Builder
+		var want []string
+		if small {
+			fmt.Fprintf(&b, `{"At":%d,"User":true,"Text":"hi"}`+"\n"+`{"At":%d,"Text":"hello"}`+"\n", at.UnixMilli(), at.UnixMilli()+1)
+			want = append(want, "hi", "hello")
+		}
+		fmt.Fprintf(&b, `{"At":%d,"User":true,"Text":"go"}`+"\n", at.Add(time.Second-time.Millisecond).UnixMilli())
+		want = append(want, "go")
+		for i := range 420 {
+			fmt.Fprintf(&b, `{"At":%d,"Text":"answer %d"}`+"\n", at.Add(time.Second+time.Duration(i)*time.Millisecond).UnixMilli(), i)
+			if i < 350 {
+				want = append(want, fmt.Sprint("answer ", i))
+			}
+		}
+		if err := os.WriteFile(filepath.Join(cwd, "sid"), []byte(b.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		i, _ := host.ReadInfo(id)
+		i.Kind, i.Cwd = "turns", cwd
+		writeInfo(t, i)
+		ts := httptest.NewServer(s.Handler())
+		t.Cleanup(ts.Close)
+		tail := through(t, open(t, ts, "/api/sessions/"+id+"/events"), "synced")
+		if k := strings.Join(kinds(tail), " "); k != "reset cut message synced" {
+			t.Fatalf("small %v: frames %s", small, k)
+		}
+		var got []string
+		cur := field(t, tail[1], "before")
+		for range 5 {
+			var page []wire
+			for w := range open(t, ts, "/api/sessions/"+id+"/history?before="+url.QueryEscape(cur)) {
+				page = append(page, w)
+			}
+			got = append(texts(page), got...)
+			if len(page) > 0 && page[len(page)-1].T == "cut" {
+				cur = field(t, page[len(page)-1], "before")
+				continue
+			}
+			cur = ""
+			break
+		}
+		if cur != "" || strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("small %v: %d of %d came, %.3q", small, len(got), len(want), got)
+		}
+	}
+}
+
+// A big turn's pages go on from the oldest event sent, with its start
+// last.
+func TestABigTurnsPagesReachItsStart(t *testing.T) {
+	var evs []event.Event
+	evs = append(evs, event.Message{Role: "user", Parts: []event.Part{{Kind: event.Text, Text: "go"}}})
+	for i := range 700 {
+		evs = append(evs, event.Message{Role: "assistant", Parts: []event.Part{{Kind: event.Text, Text: fmt.Sprint(i)}}})
+	}
+	var at place
+	var all int
+	for page := 0; ; page++ {
+		frames, next, more := pickTurns(evs, false, at, tailTurns, tailFrames, tailBytes)
+		all += len(frames)
+		if !more {
+			if page != 2 || all != len(evs) || !strings.Contains(string(frames[0]), `"go"`) || next.skip != 1 {
+				t.Fatalf("page %d: %d of %d, %+v given", page, all, len(evs), next)
+			}
+			return
+		}
+		if next.part != all {
+			t.Fatalf("page %d: %+v given, %d sent", page, next, all)
+		}
+		at = next
 	}
 }

@@ -579,3 +579,59 @@ func TestAResetSendsOnlyTheExchangesOfItsTail(t *testing.T) {
 		t.Fatalf("exchanges sent: %d, %.5q", len(ids), ids)
 	}
 }
+
+// bigTurn records a turn "go" of n answers, a time mark every 40 lines as
+// a long turn gets them, after an earlier small turn when small.
+func bigTurn(s *server, n int, small bool) {
+	if small {
+		put(s, echoLine("hi"), msgLine("hello"))
+	}
+	put(s, echoLine("go"))
+	for i := range n {
+		if i%40 == 0 {
+			time.Sleep(2 * time.Millisecond)
+			s.mu.Lock()
+			s.stamped = time.Time{}
+			s.mu.Unlock()
+		}
+		put(s, msgLine(fmt.Sprint("answer ", i)))
+	}
+}
+
+// A turn too big for the tail sends its newest part from a time mark, and
+// the cursor is that mark: what came before it, the turn's prompt too, is
+// the history's to give.
+func TestABigTurnsPartStartsAtItsCursor(t *testing.T) {
+	for _, small := range []bool{false, true} {
+		s := resumeHost(t)
+		bigTurn(s, 420, small)
+		r, got := resetOf(t, s)
+		if !r.Older || r.File || r.Turns != 1 || r.Frames > tailFrames || r.Before.IsZero() {
+			t.Fatalf("small %v: reset %+v", small, r)
+		}
+		first, _ := Decode(got[0])
+		if stamp, ok := first.(Stamp); !ok || !stamp.At.Equal(r.Before) {
+			t.Fatalf("small %v: the tail starts with %T, its cursor %v", small, first, r.Before)
+		}
+		for _, l := range got {
+			if ev, _ := Decode(l); ev != nil {
+				if m, ok := ev.(Sent); ok {
+					t.Fatalf("small %v: the prompt %q was sent, not left to the history", small, m.Text)
+				}
+			}
+		}
+		// The prompt's own mark is older than the cursor: the history has it.
+		s.mu.Lock()
+		v := &view{ring: s.ring, seq: s.seq}
+		s.mu.Unlock()
+		echo := 0
+		for i, l := range v.ring {
+			if isEcho(l) {
+				echo = i
+			}
+		}
+		if at := v.markBefore(echo); !at.Before(r.Before) {
+			t.Fatalf("small %v: the prompt at %v, the cursor %v", small, at, r.Before)
+		}
+	}
+}
