@@ -26,6 +26,16 @@ func TranscriptPath(k Kind, p Profile, cwd, sid string) string {
 	return ""
 }
 
+// FindTranscript is where agent k keeps session sid's conversation now:
+// where an agent that moves it on entering a worktree has it, else
+// TranscriptPath. It can read the disk, so never on the UI.
+func FindTranscript(k Kind, p Profile, cwd, sid string) string {
+	if t, ok := As[Transcripts](k); ok {
+		return t.FindTranscript(p, cwd, sid)
+	}
+	return TranscriptPath(k, p, cwd, sid)
+}
+
 // ModelNamer is an agent with names of its own for its model ids.
 type ModelNamer interface {
 	// ModelName is id as people say it: "claude-opus-5-5" is "Opus 5.5".
