@@ -72,6 +72,9 @@ type StartRequest struct {
 	// Resume is the session id of a past session rush didn't start (see
 	// Other): it carries on in rush, with its own agent and folder.
 	Resume string `json:"resume,omitempty"`
+	// ForkFrom is the conversation a new session starts as a copy of,
+	// under an id of its own, leaving the original as it is.
+	ForkFrom string `json:"forkFrom,omitempty"`
 	// Meta is labels the host carries in its info, for the client that
 	// started it to know its own sessions by (an owner, a chat id).
 	Meta map[string]string `json:"meta,omitempty"`
@@ -314,6 +317,10 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := metaOK(req.Meta); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.ForkFrom != "" && (req.Resume != "" || !host.ConversationID(req.ForkFrom)) {
+		fail(w, http.StatusBadRequest, "a fork names one conversation to copy, and resumes none")
 		return
 	}
 	if req.Resume != "" {

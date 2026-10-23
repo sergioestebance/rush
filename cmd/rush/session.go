@@ -265,6 +265,8 @@ type startOpts struct {
 	Resume                                                                   bool
 	Images, Env                                                              []string
 	Meta                                                                     map[string]string
+	// ForkFrom starts a new session as a copy of this conversation.
+	ForkFrom string
 }
 
 // startSession starts a session, or with Resume brings a stopped one
@@ -295,6 +297,11 @@ func startSession(o startOpts) (host.Info, error) {
 			cfg = host.Config{ID: id, SessionID: sessionID}
 		}
 		cfg.Resume = resume
+	}
+	if o.ForkFrom != "" {
+		// A new conversation of its own (Spawn names it), its history the
+		// source's.
+		cfg.ForkFrom, cfg.From = o.ForkFrom, o.ForkFrom
 	}
 	if cwd != "" {
 		abs, err := filepath.Abs(cwd)

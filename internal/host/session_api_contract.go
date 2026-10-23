@@ -645,6 +645,9 @@ type RuntimeError struct {
 
 func (e *RuntimeError) Error() string { return e.Message }
 
+// ConversationID is whether s is fit to name a conversation: a UUID.
+func ConversationID(s string) bool { return runtimeUUID(s) }
+
 func runtimeUUID(s string) bool {
 	if len(s) != 36 || s == "00000000-0000-0000-0000-000000000000" {
 		return false
