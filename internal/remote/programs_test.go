@@ -76,3 +76,28 @@ func TestStartProgramsOnlyFromServeFolders(t *testing.T) {
 		}
 	}
 }
+
+// A fork names the conversation it copies, and resumes none.
+func TestStartForkFrom(t *testing.T) {
+	s := newServer(t)
+	var started *StartRequest
+	s.Start = func(r StartRequest) (host.Info, error) { started = &r; return host.Info{ID: "abcd1234"}, nil }
+	hdr := map[string]string{"Authorization": "Bearer " + s.Token, "Content-Type": "application/json"}
+	work := t.TempDir()
+	src := "0f9b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d"
+	start := func(body string) int {
+		started = nil
+		return do(t, s.Handler(), "POST", "/api/sessions", body, hdr).Code
+	}
+	if c := start(`{"cwd":"` + work + `","forkFrom":"` + src + `"}`); c != 200 || started == nil || started.ForkFrom != src {
+		t.Fatalf("fork start: %d %+v", c, started)
+	}
+	for _, body := range []string{
+		`{"cwd":"` + work + `","forkFrom":"not-a-conversation"}`,
+		`{"cwd":"` + work + `","forkFrom":"` + src + `","resume":"` + src + `"}`,
+	} {
+		if c := start(body); c != http.StatusBadRequest || started != nil {
+			t.Fatalf("%s: %d, started %v", body, c, started)
+		}
+	}
+}

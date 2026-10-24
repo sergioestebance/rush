@@ -417,3 +417,25 @@ func TestWatchFollowsATurn(t *testing.T) {
 		t.Fatalf("watch on no session: exit %d: %s", c, o)
 	}
 }
+
+// A remote fork starts a copy of a running session under an id of its own,
+// as the fork sheet does, so any agent that forks takes it.
+func TestStartForkFromCopiesUnderItsOwnID(t *testing.T) {
+	bin := setup(t)
+	src := startJSON(t, "--cwd", filepath.Dir(bin), "--binary", bin)
+	from := src["sessionId"].(string)
+	info, err := startSession(startOpts{Cwd: filepath.Dir(bin), Binary: bin, ForkFrom: from})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ID == src["id"] {
+		t.Fatalf("the fork came back as its source %s", info.ID)
+	}
+	cfg, err := host.ReadConfig(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.From != from || !cfg.Resume {
+		t.Fatalf("fork config: from %q resume %v", cfg.From, cfg.Resume)
+	}
+}
