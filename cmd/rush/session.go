@@ -299,9 +299,9 @@ func startSession(o startOpts) (host.Info, error) {
 		cfg.Resume = resume
 	}
 	if o.ForkFrom != "" {
-		// A new conversation of its own (Spawn names it), its history the
-		// source's.
-		cfg.ForkFrom, cfg.From = o.ForkFrom, o.ForkFrom
+		// As the fork sheet forks: the source resumed as a copy under an id
+		// of its own (Spawn names it), which every agent that forks takes.
+		cfg.SessionID, cfg.Resume, cfg.Fork, cfg.From = o.ForkFrom, true, true, o.ForkFrom
 	}
 	if cwd != "" {
 		abs, err := filepath.Abs(cwd)
