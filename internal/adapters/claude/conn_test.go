@@ -35,7 +35,13 @@ while read -r line; do
   [ -n "$id" ] || continue
   case "$sub" in
   get_context_usage) echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"totalTokens":1200,"maxTokens":200000}}}' ;;
-  mcp_set_servers) echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"added":["amtana-threads"],"removed":[],"errors":{}}}}'
+  mcp_set_servers)
+    # As Claude Code does: a request that leaves out rush's own server t
+    # (an sdk entry) removes it, and a server that won't start is an error.
+    removed='[]'; errs='{}'
+    case "$line" in *'"t":{"name":"t","type":"sdk"}'*) ;; *) removed='["t"]' ;; esac
+    case "$line" in *'"broken":'*) errs='{"broken":"failed to start"}' ;; esac
+    echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"added":["amtana-threads"],"removed":'$removed',"errors":'$errs'}}}'
     echo '{"type":"control_request","request_id":"p-2","request":{"subtype":"can_use_tool","tool_name":"mcp__amtana-threads__reply","input":{},"tool_use_id":"tu-2"}}' ;;
   *) echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"did":"'$sub'"}}}' ;;
   esac
@@ -175,26 +181,50 @@ func TestCallerMCPConfig(t *testing.T) {
 
 // A caller's MCP servers reach a running Claude Code as one
 // mcp_set_servers request with the whole set, each with its environment,
-// and every tool of theirs is trusted from then on, though --allowedTools
-// named none of them.
+// beside an sdk entry for each of rush's own servers, which the request
+// would otherwise remove. Every tool of theirs is trusted from then on,
+// though --allowedTools named none of them. A server Claude Code can't
+// start is an error, and the config file goes when Claude Code exits.
 func TestSetMCPGivesClaudeCodeTheServersLive(t *testing.T) {
 	bin, log := controlClaude(t)
-	conn, err := Adapter{}.Start(context.Background(), agent.StartOptions{Dir: t.TempDir(), Binary: bin, TempDir: filepath.Join(t.TempDir(), "tmp"), Lean: true})
+	tmp := filepath.Join(t.TempDir(), "tmp")
+	conn, err := Adapter{}.Start(context.Background(), agent.StartOptions{Dir: t.TempDir(), Binary: bin, TempDir: tmp, Lean: true,
+		Tools: []agent.ToolServer{{Name: "t", Trusted: []string{"draw"}, Handle: func(jsontext.Value) jsontext.Value {
+			return jsontext.Value(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`)
+		}}},
+		MCP: []agent.MCPServer{{Name: "notes", Command: "/run/notes"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	if _, err := os.Stat(filepath.Join(tmp, "mcp-config.json")); err != nil {
+		t.Fatalf("no config file while Claude Code runs: %v", err)
+	}
 	setter, ok := conn.(agent.MCPSetter)
 	if !ok {
 		t.Fatal("Claude Code's conn takes no servers live")
 	}
-	servers := []agent.MCPServer{{Name: "amtana-threads", Command: "/run/threads-mcp", Env: map[string]string{"AMTANA_TOOL_TOKEN": "tok"}}}
+	servers := []agent.MCPServer{{Name: "amtana-threads", Command: "/run/threads-mcp", Env: map[string]string{"AMTANA_TOOL_TOKEN": "tok"}},
+		{Name: "notes", Command: "/run/notes"}}
 	if err := setter.SetMCP(servers); err != nil {
 		t.Fatal(err)
 	}
+	if err := setter.SetMCP(append(servers, agent.MCPServer{Name: "broken", Command: "/run/broken"})); err == nil {
+		t.Error("a server Claude Code could not start was taken")
+	}
 	time.Sleep(300 * time.Millisecond)
 	_ = conn.Close()
-	wantIn(t, log, `"subtype":"mcp_set_servers"`, `"servers":{"amtana-threads":{"command":"/run/threads-mcp","env":{"AMTANA_TOOL_TOKEN":"tok"},"type":"stdio"}}`)
+	wantIn(t, log, `"subtype":"mcp_set_servers"`, `"servers":{"amtana-threads":{"command":"/run/threads-mcp","env":{"AMTANA_TOOL_TOKEN":"tok"},"type":"stdio"},"notes":{"command":"/run/notes","type":"stdio"},"t":{"name":"t","type":"sdk"}}`)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(tmp, "mcp-config.json")); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the config file outlived Claude Code")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	b, _ := os.ReadFile(log)
 	allowed := false
 	for _, l := range strings.Split(string(b), "\n") {

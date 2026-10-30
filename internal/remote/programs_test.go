@@ -182,13 +182,25 @@ func TestOpMCPOnlyFromServeFolders(t *testing.T) {
 		t.Fatalf("mcp op: %d", c)
 	}
 	got := f.op(t)
-	if got["op"] != "mcp" {
-		t.Fatalf("host got %v", got)
+	if got["op"] != "mcp" || got["id"] == nil || got["id"] == "" {
+		t.Fatalf("host got %v, want an mcp op with an id to answer", got)
 	}
+	delete(got, "id")
 	b, _ := jsonx.Marshal(got["mcp"])
 	if want := `[{"args":["serve"],"command":"` + prog + `","env":{"AMTANA_TOOL_TOKEN":"tok"},"name":"amtana-threads"}]`; string(b) != want {
 		t.Fatalf("host got mcp %s\nwant %s", b, want)
 	}
+	// a busy agent that refuses them live: the host's reason, for a retry
+	f.mu.Lock()
+	f.mcpErr = "the server did not start"
+	f.mu.Unlock()
+	if w := do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", good, hdr); w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "did not start") {
+		t.Fatalf("a refused live add: %d %s", w.Code, w.Body)
+	}
+	f.op(t)
+	f.mu.Lock()
+	f.mcpErr = ""
+	f.mu.Unlock()
 	for name, c := range map[string]struct {
 		body string
 		code int

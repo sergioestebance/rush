@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,9 @@ type liveMCPConn struct {
 }
 
 func (c *liveMCPConn) SetMCP(servers []agent.MCPServer) error {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(c.log), "mcp.fail")); err == nil {
+		return errors.New("the server did not start")
+	}
 	f, err := os.OpenFile(c.log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -141,5 +145,41 @@ func TestMCPOpRestartsAnIdleAgentThatCannotTakeThemLive(t *testing.T) {
 	got := lines(t, filepath.Join(home, "starts.log"), 2)
 	if len(got) != 2 || got[1] != "start fake-session mcp=threads=/run/threads" {
 		t.Fatalf("starts.log = %q, want a resume with the server", got)
+	}
+}
+
+// A live add a busy agent refuses answers the op's id with its reason, so
+// the caller can try again; the next op naming the same server hands the
+// agent the set again, though the session keeps it already.
+func TestMCPOpThatABusyAgentRefusesAnswersAnErrorAndIsTriedAgain(t *testing.T) {
+	c, home, _ := idleAgent(t, "fakemcp")
+	if err := c.Send("again"); err != nil {
+		t.Fatal(err)
+	}
+	next(t, c, inState("blocked"))
+	fail := filepath.Join(home, "mcp.fail")
+	if err := os.WriteFile(fail, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	add := []byte(`{"op":"mcp","id":"r1","mcp":[{"name":"threads","command":"/run/threads"}]}`)
+	if err := c.Op(add); err != nil {
+		t.Fatal(err)
+	}
+	r := next(t, c, func(ev any) bool { r, ok := ev.(Reply); return ok && r.ID == "r1" }).(Reply)
+	if !strings.Contains(r.Error, "did not start") {
+		t.Fatalf("reply = %+v, want the agent's reason", r)
+	}
+	os.Remove(fail)
+	if err := c.Op([]byte(`{"op":"mcp","id":"r2","mcp":[{"name":"threads","command":"/run/threads"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if r := next(t, c, func(ev any) bool { r, ok := ev.(Reply); return ok && r.ID == "r2" }).(Reply); r.Error != "" {
+		t.Fatalf("the retry answered %q", r.Error)
+	}
+	if got := lines(t, filepath.Join(home, "mcp.log"), 1); len(got) != 1 || got[0] != "threads=/run/threads" {
+		t.Fatalf("mcp.log = %q, want the set handed again", got)
+	}
+	if got := lines(t, filepath.Join(home, "starts.log"), 1); len(got) != 1 {
+		t.Fatalf("starts.log = %q, want no restart", got)
 	}
 }

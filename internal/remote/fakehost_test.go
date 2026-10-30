@@ -60,6 +60,8 @@ type fakeHost struct {
 	ln   net.Listener
 	mu   sync.Mutex
 	conn []net.Conn
+	// mcpErr is what it answers an mcp op with: "" takes it.
+	mcpErr string
 }
 
 // startFakeHost makes session id's folder under root (a RUSH_HOME's
@@ -99,6 +101,17 @@ func startFakeHost(t *testing.T, root, id, name, cwd string, replay ...[]byte) *
 					}
 					if host.OpName(l) != "hello" {
 						f.ops <- append([]byte(nil), l...)
+					}
+					if host.OpName(l) == "mcp" {
+						// It answers an mcp op, as a host does, with mcpErr.
+						var o struct {
+							ID string `json:"id"`
+						}
+						_ = jsonx.Unmarshal(l, &o)
+						f.mu.Lock()
+						b, _ := jsonx.Marshal(map[string]string{"type": "agtop_reply", "id": o.ID, "error": f.mcpErr})
+						f.mu.Unlock()
+						c.Write(append(b, '\n'))
 					}
 				}
 			}()
