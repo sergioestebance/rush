@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0xdeafcafe/photon/jsonx"
 	"github.com/0xdeafcafe/rush/internal/agent"
@@ -219,4 +220,87 @@ func TestOpMCPOnlyFromServeFolders(t *testing.T) {
 		}
 	}
 	f.noOp(t)
+}
+
+// A host from before mcp ops never answers one: one started on an older
+// rush that kept running across an update. Serve doesn't send it the op:
+// it restarts the host on itself with the servers, at once between turns,
+// else once the turn has ended, answering 409 at once so the caller tries
+// again with its next op.
+func TestOpMCPRestartsAHostFromBeforeMCPOps(t *testing.T) {
+	shortHome(t)
+	was := quietPoll
+	quietPoll = 20 * time.Millisecond
+	t.Cleanup(func() { quietPoll = was })
+	f := startFakeHost(t, host.Root(), "feedbeef", "job", "/work")
+	run := t.TempDir()
+	prog := filepath.Join(run, "threads-mcp")
+	if err := os.WriteFile(prog, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	restarts := make(chan string, 4)
+	s := &Server{Config: Config{Name: "box"}, Token: strings.Repeat("a", 64), Programs: []string{run},
+		RestartMCP: func(id string, servers []agent.MCPServer) error {
+			b, _ := jsonx.Marshal(servers)
+			restarts <- id + " " + string(b)
+			return nil
+		}}
+	hdr := map[string]string{"Authorization": "Bearer " + s.Token, "Content-Type": "application/json"}
+	good := `{"op":"mcp","mcp":{"amtana-threads":{"command":"` + prog + `","env":{"AMTANA_TOOL_TOKEN":"tok"}}}}`
+	want := `feedbeef [{"name":"amtana-threads","command":"` + prog + `","env":{"AMTANA_TOOL_TOKEN":"tok"}}]`
+	restarted := func() string {
+		t.Helper()
+		select {
+		case r := <-restarts:
+			return r
+		case <-time.After(5 * time.Second):
+			t.Fatal("the host was not restarted")
+			return ""
+		}
+	}
+	dir := filepath.Join(host.Root(), "feedbeef")
+
+	// between turns: restarted at once, with the servers
+	f.info.Proto = host.MCPFrom - 1
+	f.writeInfo(t, dir)
+	if w := do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", good, hdr); w.Code != http.StatusAccepted {
+		t.Fatalf("an old host between turns: %d %s", w.Code, w.Body)
+	}
+	if got := restarted(); got != want {
+		t.Fatalf("restarted %s\nwant %s", got, want)
+	}
+	f.noOp(t)
+
+	// mid-turn: 409 at once, restarted when the turn has ended
+	f.info.State = "working"
+	f.writeInfo(t, dir)
+	if w := do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", good, hdr); w.Code != http.StatusConflict {
+		t.Fatalf("an old host mid-turn: %d %s", w.Code, w.Body)
+	}
+	select {
+	case r := <-restarts:
+		t.Fatalf("restarted mid-turn: %s", r)
+	case <-time.After(200 * time.Millisecond):
+	}
+	f.info.State = "idle"
+	f.writeInfo(t, dir)
+	if got := restarted(); got != want {
+		t.Fatalf("restarted %s\nwant %s", got, want)
+	}
+	f.noOp(t)
+
+	// a current host takes the op itself
+	f.info.Proto = host.Proto
+	f.writeInfo(t, dir)
+	if w := do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", good, hdr); w.Code != http.StatusAccepted {
+		t.Fatalf("a current host: %d %s", w.Code, w.Body)
+	}
+	if got := f.op(t); got["op"] != "mcp" {
+		t.Fatalf("host got %v", got)
+	}
+	select {
+	case r := <-restarts:
+		t.Fatalf("a current host restarted: %s", r)
+	default:
+	}
 }

@@ -220,3 +220,32 @@ func TestMCPOpsAtOnceNeverAnswerTakenWhileALiveAddFails(t *testing.T) {
 		t.Fatal("the first op answered taken while the agent refused the server")
 	}
 }
+
+// A host from before mcp ops is restarted on this rush with the servers
+// added to the session's own, and its agent starts again with them.
+func TestRestartWithMCPStartsTheHostAgainWithTheServers(t *testing.T) {
+	home := filepath.Dir(setup(t))
+	cfg, err := Spawn(Config{Kind: "fake", Cwd: home, Account: agent.Profile{Kind: "fake", Name: "fake", Dir: home},
+		MCP: []agent.MCPServer{{Name: "notes", Command: "/run/notes"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _ := ReadInfo(cfg.ID)
+	if err := RestartWithMCP(cfg.ID, []agent.MCPServer{{Name: "threads", Command: "/run/threads"}, {Name: "notes", Command: "/run/other"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if c, err := Dial(cfg.ID); err == nil {
+			c.Stop()
+			c.Close()
+		}
+	})
+	info, _ := ReadInfo(cfg.ID)
+	if info.HostPID == old.HostPID || !alive(info.HostPID) || !info.TakesMCP() {
+		t.Fatalf("restarted: %+v (was pid %d)", info, old.HostPID)
+	}
+	got, _ := ReadConfig(cfg.ID)
+	if l := mcpLine(got.MCP); l != "notes=/run/notes threads=/run/threads" {
+		t.Fatalf("the session keeps %q", l)
+	}
+}
