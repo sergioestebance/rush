@@ -36,6 +36,9 @@ type liveMCPConn struct {
 }
 
 func (c *liveMCPConn) SetMCP(servers []agent.MCPServer) error {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(c.log), "mcp.slow")); err == nil {
+		time.Sleep(500 * time.Millisecond)
+	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(c.log), "mcp.fail")); err == nil {
 		return errors.New("the server did not start")
 	}
@@ -181,5 +184,39 @@ func TestMCPOpThatABusyAgentRefusesAnswersAnErrorAndIsTriedAgain(t *testing.T) {
 	}
 	if got := lines(t, filepath.Join(home, "starts.log"), 1); len(got) != 1 {
 		t.Fatalf("starts.log = %q, want no restart", got)
+	}
+}
+
+// Two mcp ops at once for the same server, from two clients, while the
+// busy agent refuses it live: the second waits for the first and tries
+// again itself, so neither answers that the agent has it.
+func TestMCPOpsAtOnceNeverAnswerTakenWhileALiveAddFails(t *testing.T) {
+	c, home, id := idleAgent(t, "fakemcp")
+	if err := c.Send("again"); err != nil {
+		t.Fatal(err)
+	}
+	next(t, c, inState("blocked"))
+	for _, f := range []string{"mcp.fail", "mcp.slow"} {
+		if err := os.WriteFile(filepath.Join(home, f), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c2, err := Dial(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	if err := c.Op([]byte(`{"op":"mcp","id":"r1","mcp":[{"name":"threads","command":"/run/threads"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond) // the first is in its live add
+	if err := c2.Op([]byte(`{"op":"mcp","id":"r2","mcp":[{"name":"threads","command":"/run/threads"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if r := next(t, c2, func(ev any) bool { r, ok := ev.(Reply); return ok && r.ID == "r2" }).(Reply); r.Error == "" {
+		t.Fatal("the second op answered taken while the agent refused the server")
+	}
+	if r := next(t, c, func(ev any) bool { r, ok := ev.(Reply); return ok && r.ID == "r1" }).(Reply); r.Error == "" {
+		t.Fatal("the first op answered taken while the agent refused the server")
 	}
 }
