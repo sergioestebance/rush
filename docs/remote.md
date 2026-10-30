@@ -46,6 +46,8 @@ server in front of those hosts. This is the simpler plan that replaced
     trusts their tools. That request replaces every server rush gave it,
     rush's own in-process ones (`initialize`'s `sdkMcpServers`) too, so it
     names each of those as a `{"type":"sdk"}` entry beside the caller's.
+    Each of the caller's goes with its `args`, `[]` when it has none:
+    Claude Code (2.1.274) fails a live add of a server without them.
     Another agent restarts on its conversation when idle, else takes them
     at its next start. Unlike other ops, `mcp` answers only once the host
     has: 202 when the agent has the servers or will at its next start, 502
