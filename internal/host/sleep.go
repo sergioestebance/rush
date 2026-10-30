@@ -25,25 +25,12 @@ func ensure(id, prompt string) error {
 		}
 		return errors.New(id + " is on " + info.Remote + ", and rush remote attach " + info.Remote + " isn't running")
 	}
-	lock, err := os.OpenFile(filepath.Join(dir(id), "wake.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	unlock, err := lockWake(id)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer unlock()
 	deadline := time.Now().Add(15 * time.Second)
-	for {
-		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
-			return err
-		}
-		if time.Now().After(deadline) {
-			return errors.New("timed out waiting for session startup")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 	for {
 		info, err := ReadInfo(id)
 		if err != nil || !alive(info.HostPID) {
@@ -71,6 +58,36 @@ func ensure(id, prompt string) error {
 	cfg.Owner = 0
 	_, err = Spawn(cfg)
 	return err
+}
+
+// wakeWait is how long a wake, or a restart for MCP servers, waits for
+// another to let go of the session's wake lock.
+const wakeWait = 15 * time.Second
+
+// lockWake takes session id's wake lock, which one wake or restart holds
+// at a time so only one host starts, waiting up to wakeWait for it.
+func lockWake(id string) (unlock func(), err error) {
+	lock, err := os.OpenFile(filepath.Join(dir(id), "wake.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(wakeWait)
+	for {
+		err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			// Closing the file lets go of the lock.
+			return func() { lock.Close() }, nil
+		}
+		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			lock.Close()
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			lock.Close()
+			return nil, errors.New("timed out waiting for session startup")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // A clean sleep has no pending work, but its observed choices and cumulative

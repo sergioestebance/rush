@@ -87,18 +87,36 @@ func (l *Lister) Sweep(installed BinStamp, restart bool) (stale, restarted int) 
 	return stale, restarted
 }
 
-// TakesMCP is whether the host takes an mcp op: one from before MCPFrom
-// never answers it.
+// TakesMCP is whether the host takes an mcp op live: one from before
+// MCPFrom either never answers it or names no args to Claude Code, which
+// then fails the add.
 func (i Info) TakesMCP() bool { return i.Proto >= MCPFrom }
 
+// AddsMCP is whether servers name one the session doesn't run yet.
+func (c Config) AddsMCP(servers []agent.MCPServer) bool {
+	_, added := withMCP(c.MCP, servers)
+	return added
+}
+
 // RestartWithMCP restarts session id's host on this rush with servers
-// added to its own, by name, as an mcp op adds them: for a host from
-// before mcp ops. Its agent carries on its conversation with them. It
-// stops whatever the session is doing, so only between turns.
+// added to its own, by name, as an mcp op adds them: for a host that can't
+// take them live. Its agent carries on its conversation with them. It
+// stops whatever the session is doing, so only between turns. A session
+// that runs them all already is left as it is. It holds the session's wake
+// lock throughout, so a wake meanwhile waits for the new host rather than
+// starting a second one.
 func RestartWithMCP(id string, servers []agent.MCPServer) error {
+	unlock, err := lockWake(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	cfg, err := ReadConfig(id)
 	if err != nil {
 		return err
+	}
+	if !cfg.AddsMCP(servers) {
+		return nil
 	}
 	if cfg.Owner > 0 {
 		return errors.New("a stand-in's host ends with the program that started it")

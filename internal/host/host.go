@@ -262,9 +262,10 @@ type Task struct {
 // guide). A client sends its build's in the hello.
 const Proto = 13 // mcp ops; 12 numbered frames, resume; 11 away; 10 idle host sleep; 9 guarded compaction; 8 exchanges
 
-// MCPFrom is the first Proto whose host takes an mcp op and answers it.
-// One from before runs on an older rush: it gets MCP servers only by a
-// restart on this one (RestartWithMCP).
+// MCPFrom is the first Proto whose host takes an mcp op live and answers
+// it. One from before runs on an older rush that either never answers the
+// op or names no args to Claude Code, which then fails the add: it gets
+// MCP servers only by a restart on this one (RestartWithMCP).
 const MCPFrom = 13
 
 // Limit describes a usage limit that stopped the session.

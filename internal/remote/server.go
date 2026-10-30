@@ -494,11 +494,16 @@ var quietPoll = time.Second
 // quietWaitMost is how long serve waits for that host's turn to end.
 const quietWaitMost = 24 * time.Hour
 
-// mcpByRestart answers an mcp op to session id's host from before mcp
-// ops, which never answers one: it restarts the host on this rush with
+// mcpByRestart answers an mcp op to session id's host that can't take it
+// live (host.Info.TakesMCP): it restarts the host on this rush with
 // servers, at once between turns (202 once the new host runs), else once
-// the turn has ended (409 now, so the caller tries again).
+// the turn has ended (409 now, so the caller tries again). A session that
+// runs them all already answers 202 and restarts nothing.
 func (s *Server) mcpByRestart(w http.ResponseWriter, id string, info host.Info, servers []agent.MCPServer) {
+	if cfg, err := host.ReadConfig(id); err == nil && !cfg.AddsMCP(servers) {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
 	if info.Quiet() {
 		if err := s.restartMCP(id, servers); err != nil {
 			fail(w, http.StatusBadGateway, err.Error())
