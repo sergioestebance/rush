@@ -214,7 +214,9 @@ func TestSetMCPGivesClaudeCodeTheServersLive(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 	_ = conn.Close()
-	wantIn(t, log, `"subtype":"mcp_set_servers"`, `"servers":{"amtana-threads":{"command":"/run/threads-mcp","env":{"AMTANA_TOOL_TOKEN":"tok"},"type":"stdio"},"notes":{"command":"/run/notes","type":"stdio"},"t":{"name":"t","type":"sdk"}}`)
+	// Each goes with its args, [] when it has none: Claude Code fails a
+	// live add of a server without them.
+	wantIn(t, log, `"subtype":"mcp_set_servers"`, `"servers":{"amtana-threads":{"args":[],"command":"/run/threads-mcp","env":{"AMTANA_TOOL_TOKEN":"tok"},"type":"stdio"},"notes":{"args":[],"command":"/run/notes","type":"stdio"},"t":{"name":"t","type":"sdk"}}`)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(tmp, "mcp-config.json")); os.IsNotExist(err) {
