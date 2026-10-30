@@ -51,10 +51,13 @@ server in front of those hosts. This is the simpler plan that replaced
     has: 202 when the agent has the servers or will at its next start, 502
     with the host's reason when a busy agent refused them live (a later
     `mcp` naming the same servers tries again), 504 when the host doesn't
-    answer within 45 s. A server's `env` rests in the session's
+    answer within 45 s. A session's `mcp` ops run one after another, each
+    to its end: a second waits for a first live add and answers its own
+    result, so a 202 never stands while a refusal does. A server's `env` rests in the session's
     `config.json` (0600, for a resume) and, for Claude Code, in the
     session's `tmp/mcp-config.json` (0600, so it is never on a command
-    line), which goes when that Claude Code exits. A send's images come as
+    line), which goes when that Claude Code exits; a host killed outright
+    leaves it until the session's next start or its delete. A send's images come as
     bytes (`pictures`: png, jpeg, gif or webp, at most 8, each under 20 MB, 64 MB a message);
     serve writes them to the session's scratch folder and the host reads them
     from there, so no client path ever reaches the agent.
