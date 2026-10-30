@@ -35,7 +35,11 @@ func (fakeAgent) Start(_ context.Context, o agent.StartOptions) (agent.Conn, err
 	if o.Resume {
 		resumed = o.SessionID
 	}
-	f.WriteString(strings.TrimSpace("start "+resumed) + "\n")
+	line := strings.TrimSpace("start " + resumed)
+	if len(o.MCP) > 0 {
+		line += " mcp=" + mcpLine(o.MCP)
+	}
+	f.WriteString(line + "\n")
 	f.Close()
 	c := &fakeConn{events: make(chan event.Event, 32)}
 	c.events <- event.Init{SessionID: "fake-session", Model: "fake-1"}

@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/0xdeafcafe/photon/jsonx"
 	"github.com/0xdeafcafe/rush/internal/agent"
 	"github.com/0xdeafcafe/rush/internal/host"
 )
@@ -147,4 +149,62 @@ func TestStartMCPOnlyFromServeFolders(t *testing.T) {
 			t.Errorf("%s: %d, started %v", name, c, started)
 		}
 	}
+}
+
+// An mcp op adds MCP servers to a running session, on the same terms as a
+// start's: only from a serve told to take programs, each program from one
+// of its folders, no name and no variable of rush's own. The host gets
+// them as a list in name order, each with its own environment.
+func TestOpMCPOnlyFromServeFolders(t *testing.T) {
+	shortHome(t)
+	f := startFakeHost(t, host.Root(), "feedbeef", "job", "/work")
+	s := &Server{Config: Config{Name: "box"}, Token: strings.Repeat("a", 64)}
+	hdr := map[string]string{"Authorization": "Bearer " + s.Token, "Content-Type": "application/json"}
+	run, other := t.TempDir(), t.TempDir()
+	prog, stray := filepath.Join(run, "threads-mcp"), filepath.Join(other, "threads-mcp")
+	for _, p := range []string{prog, stray} {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	op := func(body string) int {
+		return do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", body, hdr).Code
+	}
+	q := func(s string) string { return `"` + s + `"` }
+	good := `{"op":"mcp","mcp":{"amtana-threads":{"command":` + q(prog) + `,"args":["serve"],"env":{"AMTANA_TOOL_TOKEN":"tok"}}}}`
+
+	if c := op(good); c != http.StatusForbidden {
+		t.Fatalf("no folders: %d", c)
+	}
+	f.noOp(t)
+	s.Programs = []string{run}
+	if c := op(good); c != http.StatusAccepted {
+		t.Fatalf("mcp op: %d", c)
+	}
+	got := f.op(t)
+	if got["op"] != "mcp" {
+		t.Fatalf("host got %v", got)
+	}
+	b, _ := jsonx.Marshal(got["mcp"])
+	if want := `[{"name":"amtana-threads","command":"` + prog + `","args":["serve"],"env":{"AMTANA_TOOL_TOKEN":"tok"}}]`; string(b) != want {
+		t.Fatalf("host got mcp %s\nwant %s", b, want)
+	}
+	for name, c := range map[string]struct {
+		body string
+		code int
+	}{
+		"another folder":    {`{"op":"mcp","mcp":{"x":{"command":` + q(stray) + `}}}`, http.StatusForbidden},
+		"rush's own":        {`{"op":"mcp","mcp":{"rush":{"command":` + q(prog) + `}}}`, http.StatusForbidden},
+		"a bad name":        {`{"op":"mcp","mcp":{"A B":{"command":` + q(prog) + `}}}`, http.StatusForbidden},
+		"no program":        {`{"op":"mcp","mcp":{"x":{}}}`, http.StatusForbidden},
+		"a rush variable":   {`{"op":"mcp","mcp":{"x":{"command":` + q(prog) + `,"env":{"RUSH_SESSION":"y"}}}}`, http.StatusForbidden},
+		"a bad variable":    {`{"op":"mcp","mcp":{"x":{"command":` + q(prog) + `,"env":{"A=B":"y"}}}}`, http.StatusForbidden},
+		"no server":         {`{"op":"mcp"}`, http.StatusBadRequest},
+		"servers on a send": {`{"op":"send","text":"hi","mcp":{"x":{"command":` + q(prog) + `}}}`, http.StatusBadRequest},
+	} {
+		if got := op(c.body); got != c.code {
+			t.Errorf("%s: %d, want %d", name, got, c.code)
+		}
+	}
+	f.noOp(t)
 }

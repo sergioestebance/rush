@@ -35,6 +35,8 @@ while read -r line; do
   [ -n "$id" ] || continue
   case "$sub" in
   get_context_usage) echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"totalTokens":1200,"maxTokens":200000}}}' ;;
+  mcp_set_servers) echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"added":["amtana-threads"],"removed":[],"errors":{}}}}'
+    echo '{"type":"control_request","request_id":"p-2","request":{"subtype":"can_use_tool","tool_name":"mcp__amtana-threads__reply","input":{},"tool_use_id":"tu-2"}}' ;;
   *) echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"did":"'$sub'"}}}' ;;
   esac
 done
@@ -139,18 +141,66 @@ func TestAnswersKeepTheQuestion(t *testing.T) {
 }
 
 // A caller's MCP servers reach Claude Code as one config beside rush's
-// own, every tool of theirs trusted.
+// own, every tool of theirs trusted. With a scratch folder the config is a
+// file only the user reads, so a server's environment stays off the
+// command line.
 func TestCallerMCPConfig(t *testing.T) {
-	if f := mcpFlags(nil); f != nil {
-		t.Fatalf("none: %v", f)
+	if f, err := mcpFlags(nil, ""); f != nil || err != nil {
+		t.Fatalf("none: %v %v", f, err)
 	}
-	f := mcpFlags([]agent.MCPServer{{Name: "amtana-threads", Command: "/run/amtana", Args: []string{"threads-mcp"}}})
+	servers := []agent.MCPServer{{Name: "amtana-threads", Command: "/run/amtana", Args: []string{"threads-mcp"}}}
+	f, err := mcpFlags(servers, "")
 	want := []string{"--mcp-config", `{"mcpServers":{"amtana-threads":{"type":"stdio","command":"/run/amtana","args":["threads-mcp"]}}}`}
-	if !slices.Equal(f, want) {
-		t.Fatalf("flags = %q", f)
+	if err != nil || !slices.Equal(f, want) {
+		t.Fatalf("flags = %q %v", f, err)
+	}
+	tmp := filepath.Join(t.TempDir(), "tmp")
+	servers[0].Env = map[string]string{"AMTANA_TOOL_TOKEN": "tok"}
+	f, err = mcpFlags(servers, tmp)
+	if err != nil || len(f) != 2 || f[0] != "--mcp-config" || strings.Contains(f[1], "tok") {
+		t.Fatalf("flags = %q %v", f, err)
+	}
+	st, err := os.Stat(f[1])
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("config file %s: %v %v", f[1], st, err)
+	}
+	if b, _ := os.ReadFile(f[1]); !strings.Contains(string(b), `"env":{"AMTANA_TOOL_TOKEN":"tok"}`) {
+		t.Fatalf("config file holds %s", b)
 	}
 	c := &conn{mcp: []agent.MCPServer{{Name: "amtana-threads"}}}
 	if !slices.Contains(c.trusted(), "mcp__amtana-threads") {
 		t.Fatalf("trusted = %v", c.trusted())
+	}
+}
+
+// A caller's MCP servers reach a running Claude Code as one
+// mcp_set_servers request with the whole set, each with its environment,
+// and every tool of theirs is trusted from then on, though --allowedTools
+// named none of them.
+func TestSetMCPGivesClaudeCodeTheServersLive(t *testing.T) {
+	bin, log := controlClaude(t)
+	conn, err := Adapter{}.Start(context.Background(), agent.StartOptions{Dir: t.TempDir(), Binary: bin, TempDir: filepath.Join(t.TempDir(), "tmp"), Lean: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	setter, ok := conn.(agent.MCPSetter)
+	if !ok {
+		t.Fatal("Claude Code's conn takes no servers live")
+	}
+	servers := []agent.MCPServer{{Name: "amtana-threads", Command: "/run/threads-mcp", Env: map[string]string{"AMTANA_TOOL_TOKEN": "tok"}}}
+	if err := setter.SetMCP(servers); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	_ = conn.Close()
+	wantIn(t, log, `"subtype":"mcp_set_servers"`, `"servers":{"amtana-threads":{"type":"stdio","command":"/run/threads-mcp","env":{"AMTANA_TOOL_TOKEN":"tok"}}}`)
+	b, _ := os.ReadFile(log)
+	allowed := false
+	for _, l := range strings.Split(string(b), "\n") {
+		allowed = allowed || strings.Contains(l, `"request_id":"p-2"`) && strings.Contains(l, `"behavior":"allow"`)
+	}
+	if !allowed {
+		t.Errorf("the new server's tool was not allowed:\n%s", b)
 	}
 }

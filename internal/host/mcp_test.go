@@ -1,0 +1,145 @@
+package host
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/0xdeafcafe/rush/internal/agent"
+	"github.com/0xdeafcafe/rush/internal/agent/event"
+)
+
+// liveMCPAgent is the fake agent with one more thing it can do: take its
+// caller's MCP servers while it runs. Each set is logged to mcp.log beside
+// its profile, one line of name=command pairs.
+type liveMCPAgent struct{ fakeAgent }
+
+func init() { agent.Register(liveMCPAgent{}) }
+
+func (liveMCPAgent) Kind() agent.Kind { return "fakemcp" }
+
+func (a liveMCPAgent) Start(ctx context.Context, o agent.StartOptions) (agent.Conn, error) {
+	c, err := a.fakeAgent.Start(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	return &liveMCPConn{fakeConn: c.(*fakeConn), log: filepath.Join(o.Profile.Dir, "mcp.log")}, nil
+}
+
+type liveMCPConn struct {
+	*fakeConn
+	log string
+}
+
+func (c *liveMCPConn) SetMCP(servers []agent.MCPServer) error {
+	f, err := os.OpenFile(c.log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(mcpLine(servers) + "\n")
+	return err
+}
+
+// mcpLine is servers as name=command pairs, in their order.
+func mcpLine(servers []agent.MCPServer) string {
+	var out []string
+	for _, m := range servers {
+		out = append(out, m.Name+"="+m.Command)
+	}
+	return strings.Join(out, " ")
+}
+
+// idleAgent starts a session of kind with a first message, answers the
+// approval it asks, and waits until it is idle.
+func idleAgent(t *testing.T, kind agent.Kind) (c *Client, home, id string) {
+	t.Helper()
+	home = filepath.Dir(setup(t))
+	cfg, err := Spawn(Config{Owner: os.Getpid(), Kind: string(kind), Cwd: home, Account: agent.Profile{Kind: kind, Name: "fake", Dir: home}, Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err = Dial(cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Stop(); c.Close() })
+	ap := next(t, c, func(ev any) bool { _, ok := ev.(event.Approval); return ok }).(event.Approval)
+	if err := c.Allow(ap.ID, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	next(t, c, inState("idle"))
+	return c, home, cfg.ID
+}
+
+// lines is the file's lines, waiting up to 5s for at least n.
+func lines(t *testing.T, path string, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, _ := os.ReadFile(path)
+		got := strings.Split(strings.TrimSpace(string(b)), "\n")
+		if len(b) == 0 {
+			got = nil
+		}
+		if len(got) >= n || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// An mcp op gives a running agent that takes servers live the session's
+// whole set at once, with no restart. A name the session runs already is
+// kept as it was, and an op that adds nothing new asks nothing of the agent.
+func TestMCPOpAddsServersToARunningAgentLive(t *testing.T) {
+	c, home, id := idleAgent(t, "fakemcp")
+	if err := c.AddMCP([]agent.MCPServer{{Name: "threads", Command: "/run/threads"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := lines(t, filepath.Join(home, "mcp.log"), 1); len(got) != 1 || got[0] != "threads=/run/threads" {
+		t.Fatalf("mcp.log = %q", got)
+	}
+	if err := c.AddMCP([]agent.MCPServer{{Name: "threads", Command: "/run/other"}, {Name: "notes", Command: "/run/notes"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := lines(t, filepath.Join(home, "mcp.log"), 2); len(got) != 2 || got[1] != "notes=/run/notes threads=/run/threads" {
+		t.Fatalf("mcp.log = %q", got)
+	}
+	if err := c.AddMCP([]agent.MCPServer{{Name: "threads", Command: "/run/other"}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := lines(t, filepath.Join(home, "mcp.log"), 3); len(got) != 2 {
+		t.Fatalf("an op adding nothing new reached the agent: %q", got)
+	}
+	if got := lines(t, filepath.Join(home, "starts.log"), 1); len(got) != 1 || got[0] != "start" {
+		t.Fatalf("starts.log = %q, want one start", got)
+	}
+	cfg, err := ReadConfig(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mcpLine(cfg.MCP); got != "notes=/run/notes threads=/run/threads" {
+		t.Fatalf("the session keeps %q", got)
+	}
+}
+
+// An idle agent that cannot take servers live starts again on its
+// conversation with them.
+func TestMCPOpRestartsAnIdleAgentThatCannotTakeThemLive(t *testing.T) {
+	c, home, _ := idleAgent(t, "fake")
+	if err := c.AddMCP([]agent.MCPServer{{Name: "threads", Command: "/run/threads"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Send("again"); err != nil {
+		t.Fatal(err)
+	}
+	got := lines(t, filepath.Join(home, "starts.log"), 2)
+	if len(got) != 2 || got[1] != "start fake-session mcp=threads=/run/threads" {
+		t.Fatalf("starts.log = %q, want a resume with the server", got)
+	}
+}
