@@ -59,15 +59,19 @@ server in front of those hosts. This is the simpler plan that replaced
     `config.json` (0600, for a resume) and, for Claude Code, in the
     session's `tmp/mcp-config.json` (0600, so it is never on a command
     line), which goes when that Claude Code exits; a host killed outright
-    leaves it until the session's next start or its delete. A host from
-    before `mcp` ops (its info's `proto` under 13: one started on an older
-    rush that kept running across an update) never answers one, so serve
-    doesn't send it: it restarts that host on itself with the servers added
-    to the session's own, and its agent carries on its conversation with
-    them. Between turns that's at once, and `mcp` answers 202 once the new
-    host runs; mid-turn `mcp` answers 409 at once and serve restarts the
-    host when the turn has ended, so the agent has the servers from its
-    next turn. A send's images come as
+    leaves it until the session's next start or its delete. A host under
+    `proto` 13 (one started on an older rush that kept running across an
+    update) can't take `mcp` live: one from before `mcp` ops never answers
+    it, and one from after names no `args` to Claude Code, which then fails
+    the add. Serve doesn't send it the op. When the session's config runs
+    every server named already, `mcp` answers 202 and nothing restarts.
+    Otherwise serve restarts that host on itself with the servers added to
+    the session's own, and its agent carries on its conversation with them,
+    under the session's wake lock, so a send that wakes the session meanwhile
+    waits for the new host rather than starting a second one. Between turns
+    that's at once, and `mcp` answers 202 once the new host runs; mid-turn
+    `mcp` answers 409 at once and serve restarts the host when the turn has
+    ended, so the agent has the servers from its next turn. A send's images come as
     bytes (`pictures`: png, jpeg, gif or webp, at most 8, each under 20 MB, 64 MB a message);
     serve writes them to the session's scratch folder and the host reads them
     from there, so no client path ever reaches the agent.
