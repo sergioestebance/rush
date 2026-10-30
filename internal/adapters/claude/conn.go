@@ -222,10 +222,12 @@ func (c *conn) trusted() []string {
 }
 
 // stdioServer is one of a caller's MCP servers in Claude Code's own words.
+// Args is always there, [] when it has none: Claude Code (2.1.274) fails a
+// live add (mcp_set_servers) of a server without them.
 type stdioServer struct {
 	Type    string            `json:"type"`
 	Command string            `json:"command"`
-	Args    []string          `json:"args,omitempty"`
+	Args    []string          `json:"args"`
 	Env     map[string]string `json:"env,omitempty"`
 }
 
@@ -233,7 +235,11 @@ type stdioServer struct {
 func mcpConfig(servers []agent.MCPServer) map[string]stdioServer {
 	cfg := map[string]stdioServer{}
 	for _, m := range servers {
-		cfg[m.Name] = stdioServer{Type: "stdio", Command: m.Command, Args: m.Args, Env: m.Env}
+		args := m.Args
+		if args == nil {
+			args = []string{}
+		}
+		cfg[m.Name] = stdioServer{Type: "stdio", Command: m.Command, Args: args, Env: m.Env}
 	}
 	return cfg
 }
