@@ -169,6 +169,16 @@ func (c *Conn) begin(rpc *client, o agent.StartOptions) error {
 				"tool_timeout_sec": 3600, "env_vars": envNames(append(os.Environ(), o.Env...)), "tools": tools}}
 		}
 	}
+	for _, m := range o.MCP {
+		// The caller's own servers; Codex starts them with a bare environment.
+		cfg, _ := params["config"].(map[string]any)
+		if cfg == nil {
+			cfg = map[string]any{}
+			params["config"] = cfg
+		}
+		cfg["mcp_servers."+m.Name] = map[string]any{"command": m.Command, "args": m.Args,
+			"env_vars": envNames(append(os.Environ(), o.Env...))}
+	}
 	if len(o.SkillRoots) > 0 {
 		// Claude Code's skills beside Codex's own; not reading them is no reason not to start.
 		_ = rpc.call(c.ctx, "skills/extraRoots/set", map[string]any{"extraRoots": o.SkillRoots}, nil)

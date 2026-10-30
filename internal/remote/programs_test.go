@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/0xdeafcafe/rush/internal/agent"
 	"github.com/0xdeafcafe/rush/internal/host"
 )
 
@@ -98,6 +99,52 @@ func TestStartForkFrom(t *testing.T) {
 	} {
 		if c := start(body); c != http.StatusBadRequest || started != nil {
 			t.Fatalf("%s: %d, started %v", body, c, started)
+		}
+	}
+}
+
+// A start's MCP servers reach the host only from a serve told to take
+// programs, each server's program from one of its folders.
+func TestStartMCPOnlyFromServeFolders(t *testing.T) {
+	s := newServer(t)
+	var started *StartRequest
+	s.Start = func(r StartRequest) (host.Info, error) { started = &r; return host.Info{ID: "abcd1234"}, nil }
+	hdr := map[string]string{"Authorization": "Bearer " + s.Token, "Content-Type": "application/json"}
+	work, run, other := t.TempDir(), t.TempDir(), t.TempDir()
+	prog, stray := filepath.Join(run, "threads-mcp"), filepath.Join(other, "threads-mcp")
+	for _, p := range []string{prog, stray} {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := func(body string) int {
+		started = nil
+		return do(t, s.Handler(), "POST", "/api/sessions", body, hdr).Code
+	}
+	q := func(s string) string { return `"` + s + `"` }
+	good := `{"cwd":` + q(work) + `,"mcp":{"amtana-threads":{"command":` + q(prog) + `,"args":["serve"]}}}`
+
+	if c := start(good); c != http.StatusForbidden || started != nil {
+		t.Fatalf("no folders: %d, started %v", c, started)
+	}
+	s.Programs = []string{run}
+	if c := start(good); c != 200 || started == nil {
+		t.Fatalf("mcp start: %d", c)
+	}
+	want := []agent.MCPServer{{Name: "amtana-threads", Command: prog, Args: []string{"serve"}}}
+	if got := started.MCPList(); !slices.EqualFunc(got, want, func(a, b agent.MCPServer) bool {
+		return a.Name == b.Name && a.Command == b.Command && slices.Equal(a.Args, b.Args)
+	}) {
+		t.Fatalf("host got %+v", got)
+	}
+	for name, body := range map[string]string{
+		"another folder": `{"cwd":` + q(work) + `,"mcp":{"x":{"command":` + q(stray) + `}}}`,
+		"rush's own":     `{"cwd":` + q(work) + `,"mcp":{"rush":{"command":` + q(prog) + `}}}`,
+		"a bad name":     `{"cwd":` + q(work) + `,"mcp":{"A B":{"command":` + q(prog) + `}}}`,
+		"no program":     `{"cwd":` + q(work) + `,"mcp":{"x":{}}}`,
+	} {
+		if c := start(body); c != http.StatusForbidden || started != nil {
+			t.Errorf("%s: %d, started %v", name, c, started)
 		}
 	}
 }

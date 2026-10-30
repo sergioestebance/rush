@@ -27,6 +27,14 @@ type ToolServer struct {
 	Args []string
 }
 
+// MCPServer is an MCP server of the caller's own the agent runs as a
+// process beside rush's, its tools all trusted: the caller chose it.
+type MCPServer struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+}
+
 // Responder is a Conn that takes an approval's answer with more than an
 // option: the call's input as you changed it, in the agent's own words,
 // and a refusal's message, and whether a refusal stops the turn.

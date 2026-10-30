@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/0xdeafcafe/photon/jsonx"
+	"github.com/0xdeafcafe/rush/internal/agent"
 	"github.com/0xdeafcafe/rush/internal/host"
 )
 
@@ -437,5 +438,23 @@ func TestStartForkFromCopiesUnderItsOwnID(t *testing.T) {
 	}
 	if cfg.From != from || !cfg.Resume {
 		t.Fatalf("fork config: from %q resume %v", cfg.From, cfg.Resume)
+	}
+}
+
+// A remote start's MCP servers are kept with the session, so a resume
+// starts the agent with them again.
+func TestStartKeepsCallerMCP(t *testing.T) {
+	bin := setup(t)
+	mcp := []agent.MCPServer{{Name: "amtana-threads", Command: bin, Args: []string{"threads-mcp"}}}
+	info, err := startSession(startOpts{Cwd: filepath.Dir(bin), Binary: bin, MCP: mcp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := host.ReadConfig(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.MCP) != 1 || cfg.MCP[0].Name != "amtana-threads" || cfg.MCP[0].Args[0] != "threads-mcp" {
+		t.Fatalf("config MCP = %+v", cfg.MCP)
 	}
 }
