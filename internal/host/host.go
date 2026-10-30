@@ -408,6 +408,10 @@ type server struct {
 	// mcpBehind is the running agent when it refused the session's MCP
 	// servers live: a later mcp op hands it them again.
 	mcpBehind agent.Conn
+	// mcpOps runs the session's mcp ops one after another, each to its
+	// end: mu is let go during a live add, and a second op must not answer
+	// before the first's add is known.
+	mcpOps sync.Mutex
 	// waiting is when a message went to the agent that it hasn't begun
 	// answering: zero once it has (see stillWorking).
 	waiting time.Time
@@ -1739,6 +1743,10 @@ type op struct {
 }
 
 func (s *server) do(o op) error {
+	if o.Op == "mcp" {
+		s.mcpOps.Lock()
+		defer s.mcpOps.Unlock()
+	}
 	if s.api != nil {
 		s.api.mutation.Lock()
 		defer s.api.mutation.Unlock()
