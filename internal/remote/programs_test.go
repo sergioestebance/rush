@@ -222,11 +222,12 @@ func TestOpMCPOnlyFromServeFolders(t *testing.T) {
 	f.noOp(t)
 }
 
-// A host from before mcp ops never answers one: one started on an older
-// rush that kept running across an update. Serve doesn't send it the op:
-// it restarts the host on itself with the servers, at once between turns,
-// else once the turn has ended, answering 409 at once so the caller tries
-// again with its next op.
+// A host under Proto 13 can't take an mcp op live: one from before mcp ops
+// never answers it, and one from after names no args to Claude Code, which
+// fails the add. Serve doesn't send it the op: it restarts the host on
+// itself with the servers, at once between turns, else once the turn has
+// ended, answering 409 at once so the caller tries again with its next op.
+// A host whose session runs every server named already is left as it is.
 func TestOpMCPRestartsAHostFromBeforeMCPOps(t *testing.T) {
 	shortHome(t)
 	was := quietPoll
@@ -258,11 +259,18 @@ func TestOpMCPRestartsAHostFromBeforeMCPOps(t *testing.T) {
 			return ""
 		}
 	}
+	noRestart := func(why string) {
+		t.Helper()
+		select {
+		case r := <-restarts:
+			t.Fatalf("%s: restarted %s", why, r)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 	dir := filepath.Join(host.Root(), "feedbeef")
 
 	// between turns: restarted at once, with the servers
-	f.info.Proto = host.MCPFrom - 1
-	f.writeInfo(t, dir)
+	f.setInfo(t, dir, func(i *host.Info) { i.Proto = host.MCPFrom - 1 })
 	if w := do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", good, hdr); w.Code != http.StatusAccepted {
 		t.Fatalf("an old host between turns: %d %s", w.Code, w.Body)
 	}
@@ -272,26 +280,34 @@ func TestOpMCPRestartsAHostFromBeforeMCPOps(t *testing.T) {
 	f.noOp(t)
 
 	// mid-turn: 409 at once, restarted when the turn has ended
-	f.info.State = "working"
-	f.writeInfo(t, dir)
+	f.setInfo(t, dir, func(i *host.Info) { i.State = "working" })
 	if w := do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", good, hdr); w.Code != http.StatusConflict {
 		t.Fatalf("an old host mid-turn: %d %s", w.Code, w.Body)
 	}
-	select {
-	case r := <-restarts:
-		t.Fatalf("restarted mid-turn: %s", r)
-	case <-time.After(200 * time.Millisecond):
-	}
-	f.info.State = "idle"
-	f.writeInfo(t, dir)
+	noRestart("mid-turn")
+	f.setInfo(t, dir, func(i *host.Info) { i.State = "idle" })
 	if got := restarted(); got != want {
 		t.Fatalf("restarted %s\nwant %s", got, want)
 	}
 	f.noOp(t)
 
+	// a session that runs the server already: 202 and nothing restarts,
+	// between turns or mid-turn
+	cfg, _ := jsonx.Marshal(host.Config{ID: "feedbeef", MCP: []agent.MCPServer{{Name: "amtana-threads", Command: prog}}})
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), cfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"idle", "working"} {
+		f.setInfo(t, dir, func(i *host.Info) { i.State = state })
+		if w := do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", good, hdr); w.Code != http.StatusAccepted {
+			t.Fatalf("an old host running the server, %s: %d %s", state, w.Code, w.Body)
+		}
+		noRestart("an old host running the server, " + state)
+	}
+	f.noOp(t)
+
 	// a current host takes the op itself
-	f.info.Proto = host.Proto
-	f.writeInfo(t, dir)
+	f.setInfo(t, dir, func(i *host.Info) { i.Proto, i.State = host.Proto, "idle" })
 	if w := do(t, s.Handler(), "POST", "/api/sessions/feedbeef/op", good, hdr); w.Code != http.StatusAccepted {
 		t.Fatalf("a current host: %d %s", w.Code, w.Body)
 	}

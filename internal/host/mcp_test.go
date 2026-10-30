@@ -249,3 +249,65 @@ func TestRestartWithMCPStartsTheHostAgainWithTheServers(t *testing.T) {
 		t.Fatalf("the session keeps %q", l)
 	}
 }
+
+// fakeSession starts a session of the fake agent running servers, stopped
+// when the test ends.
+func fakeSession(t *testing.T, servers ...agent.MCPServer) Config {
+	t.Helper()
+	home := filepath.Dir(setup(t))
+	cfg, err := Spawn(Config{Kind: "fake", Cwd: home, Account: agent.Profile{Kind: "fake", Name: "fake", Dir: home}, MCP: servers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if c, err := Dial(cfg.ID); err == nil {
+			c.Stop()
+			c.Close()
+		}
+	})
+	return cfg
+}
+
+// A host whose session runs every server named already is left as it is:
+// nothing to add is no reason to stop what it does.
+func TestRestartWithMCPLeavesAHostThatRunsTheServers(t *testing.T) {
+	cfg := fakeSession(t, agent.MCPServer{Name: "threads", Command: "/run/threads"})
+	old, _ := ReadInfo(cfg.ID)
+	if err := RestartWithMCP(cfg.ID, []agent.MCPServer{{Name: "threads", Command: "/run/other"}}); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := ReadInfo(cfg.ID); info.HostPID != old.HostPID || !alive(old.HostPID) {
+		t.Fatalf("restarted: pid %d, was %d", info.HostPID, old.HostPID)
+	}
+}
+
+// A restart for MCP servers holds the session's wake lock, as a wake does,
+// so a send that wakes the session meanwhile waits for the new host rather
+// than starting a second one.
+func TestRestartWithMCPWaitsForTheWakeLock(t *testing.T) {
+	cfg := fakeSession(t)
+	old, _ := ReadInfo(cfg.ID)
+	unlock, err := lockWake(cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- RestartWithMCP(cfg.ID, []agent.MCPServer{{Name: "threads", Command: "/run/threads"}}) }()
+	// A restart takes about 0.1 s, and about 1 s under -race.
+	time.Sleep(3 * time.Second)
+	if info, _ := ReadInfo(cfg.ID); info.HostPID != old.HostPID || !alive(old.HostPID) {
+		t.Fatalf("restarted while a wake held the lock: pid %d, was %d", info.HostPID, old.HostPID)
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the restart never took the lock")
+	}
+	if info, _ := ReadInfo(cfg.ID); info.HostPID == old.HostPID || !alive(info.HostPID) {
+		t.Fatalf("not restarted after the lock: %+v", info)
+	}
+}

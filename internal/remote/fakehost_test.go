@@ -121,14 +121,27 @@ func startFakeHost(t *testing.T, root, id, name, cwd string, replay ...[]byte) *
 }
 
 func (f *fakeHost) writeInfo(t *testing.T, dir string) {
+	f.mu.Lock()
 	b, _ := jsonx.Marshal(f.info)
+	f.mu.Unlock()
 	if err := os.WriteFile(filepath.Join(dir, "info.json"), b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
+// setInfo changes the host's info, under its lock, and writes it to dir.
+func (f *fakeHost) setInfo(t *testing.T, dir string, change func(*host.Info)) {
+	t.Helper()
+	f.mu.Lock()
+	change(&f.info)
+	f.mu.Unlock()
+	f.writeInfo(t, dir)
+}
+
 func (f *fakeHost) sendInfoTo(c net.Conn) {
+	f.mu.Lock()
 	b, _ := jsonx.Marshal(f.info)
+	f.mu.Unlock()
 	c.Write(append(append([]byte(`{"info":`), b...), []byte(`,"type":"agtop_info"}`+"\n")...))
 }
 
