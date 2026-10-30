@@ -33,6 +33,17 @@ type MCPServer struct {
 	Name    string   `json:"name"`
 	Command string   `json:"command"`
 	Args    []string `json:"args,omitempty"`
+	// Env is added to the server's environment, over the agent's own.
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// MCPMost is how many of its caller's MCP servers a session runs at most.
+const MCPMost = 16
+
+// MCPSetter is a Conn that takes its caller's MCP servers while it runs,
+// mid-turn too: the whole set, in place of the ones it had.
+type MCPSetter interface {
+	SetMCP(servers []MCPServer) error
 }
 
 // Responder is a Conn that takes an approval's answer with more than an

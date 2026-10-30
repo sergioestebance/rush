@@ -144,7 +144,7 @@ func TestHandshake(t *testing.T) {
 }
 
 // A caller's MCP servers start with the thread, the session's environment
-// passed on.
+// passed on and each server's own set over it.
 func TestThreadStartCallerMCP(t *testing.T) {
 	cr, fw := io.Pipe()
 	fr, cw := io.Pipe()
@@ -153,14 +153,14 @@ func TestThreadStartCallerMCP(t *testing.T) {
 	defer c.Close()
 	go func() {
 		_ = c.begin(newClient(cr, cw, c.handle), agent.StartOptions{Dir: "/w", Env: []string{"AMTANA_TOOL_TOKEN=t"},
-			MCP: []agent.MCPServer{{Name: "amtana-threads", Command: "/run/amtana", Args: []string{"threads-mcp"}}}})
+			MCP: []agent.MCPServer{{Name: "amtana-threads", Command: "/run/amtana", Args: []string{"threads-mcp"}, Env: map[string]string{"AMTANA_TOOL_TOKEN": "s"}}}})
 	}()
 	f.respond(f.expect("initialize").ID, map[string]any{"userAgent": "rush/1"})
 	f.expect("initialized")
 	cfg, _ := params(t, f.expect("thread/start"))["config"].(map[string]any)
 	srv, _ := cfg["mcp_servers.amtana-threads"].(map[string]any)
 	if srv["command"] != "/run/amtana" || !reflect.DeepEqual(srv["args"], []any{"threads-mcp"}) ||
-		!slices.Contains(srv["env_vars"].([]any), any("AMTANA_TOOL_TOKEN")) {
+		!slices.Contains(srv["env_vars"].([]any), any("AMTANA_TOOL_TOKEN")) || !reflect.DeepEqual(srv["env"], map[string]any{"AMTANA_TOOL_TOKEN": "s"}) {
 		t.Fatalf("config = %v", cfg)
 	}
 }

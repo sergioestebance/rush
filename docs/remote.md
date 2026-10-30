@@ -25,6 +25,9 @@ server in front of those hosts. This is the simpler plan that replaced
     only from one of those folders; otherwise a start with either is refused
     (403). They're for the machine's own client, which puts a wrapper there
     that locks the agent in; no `RUSH_` variable may be set.
+    `mcp` (names to `command`, `args` and `env`) gives the agent MCP servers
+    of the caller's own, on the same terms: each program from one of those
+    folders, at most 16, no name or `RUSH_` variable of rush's own.
   - `GET /api/sessions/{id}/events` is a Server-Sent Events stream. A running
     host's lines are decoded and sent as neutral events (`{"t":…,"e":…}`),
     with the host's replay first. A host that isn't running sends its saved
@@ -35,8 +38,13 @@ server in front of those hosts. This is the simpler plan that replaced
   - `POST /api/sessions/{id}/op` sends one host op from an allowlist: send,
     allow/deny, interrupt, stop, model/effort/mode, stop_task, background,
     queue ops, away/back, limit (carry on at the reset or not), context,
-    tell (a subagent) and without. `send` wakes a sleeping host first
-    (`host.Ensure`), as `rush session send` does. A send's images come as
+    tell (a subagent), without, and mcp. `send` wakes a sleeping host first
+    (`host.Ensure`), as `rush session send` does, and so does `mcp`.
+    `mcp` adds MCP servers to a running session on a start's terms; a name
+    it runs already is kept as it was. Claude Code gets the whole set at
+    once with its `mcp_set_servers` control request, mid-turn too, and
+    trusts their tools; another agent restarts on its conversation when
+    idle, else takes them at its next start. A send's images come as
     bytes (`pictures`: png, jpeg, gif or webp, at most 8, each under 20 MB, 64 MB a message);
     serve writes them to the session's scratch folder and the host reads them
     from there, so no client path ever reaches the agent.

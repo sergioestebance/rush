@@ -176,8 +176,11 @@ func (c *Conn) begin(rpc *client, o agent.StartOptions) error {
 			cfg = map[string]any{}
 			params["config"] = cfg
 		}
-		cfg["mcp_servers."+m.Name] = map[string]any{"command": m.Command, "args": m.Args,
-			"env_vars": envNames(append(os.Environ(), o.Env...))}
+		srv := map[string]any{"command": m.Command, "args": m.Args, "env_vars": envNames(append(os.Environ(), o.Env...))}
+		if len(m.Env) > 0 {
+			srv["env"] = m.Env // the server's own, over the session's
+		}
+		cfg["mcp_servers."+m.Name] = srv
 	}
 	if len(o.SkillRoots) > 0 {
 		// Claude Code's skills beside Codex's own; not reading them is no reason not to start.

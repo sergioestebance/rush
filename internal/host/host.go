@@ -602,6 +602,19 @@ func TurnCost(spent *float64, total float64) float64 {
 	return d
 }
 
+// withMCP is have with the servers of add it doesn't name yet, in name
+// order, and whether any was added. A name have runs keeps its own server.
+func withMCP(have, add []agent.MCPServer) ([]agent.MCPServer, bool) {
+	out, added := slices.Clone(have), false
+	for _, m := range add {
+		if !slices.ContainsFunc(out, func(h agent.MCPServer) bool { return h.Name == m.Name }) {
+			out, added = append(out, m), true
+		}
+	}
+	slices.SortFunc(out, func(a, b agent.MCPServer) int { return strings.Compare(a.Name, b.Name) })
+	return out, added
+}
+
 // detach forgets the running session so nothing more is sent to it, and
 // returns it for stopping outside the lock. Called with mu held.
 func (s *server) detach() agent.Conn {
@@ -1693,32 +1706,33 @@ func (s *server) steerQueued(i int, text string) error {
 
 // op is one command from a client.
 type op struct {
-	ExpectedSession   string          `json:"expectedSession,omitempty"`
-	ExpectedUpdatedAt time.Time       `json:"expectedUpdatedAt,omitzero"`
-	Op                string          `json:"op"`
-	Exchange          *event.Exchange `json:"exchange,omitempty"`
-	Text              string          `json:"text,omitempty"`
-	ID                string          `json:"id,omitempty"`
-	Always            bool            `json:"always,omitzero"`
-	Input             jsontext.Value  `json:"input,omitzero"`
-	Message           string          `json:"message,omitempty"`
-	Interrupt         bool            `json:"interrupt,omitzero"`
-	Mode              string          `json:"mode,omitempty"`
-	Model             string          `json:"model,omitempty"`
-	Effort            string          `json:"effort,omitempty"`
-	Now               bool            `json:"now,omitzero"`
-	Guide             bool            `json:"guide,omitzero"` // send: into the turn under way, not stopping it
-	Images            []string        `json:"images,omitempty"`
-	Index             int             `json:"index,omitzero"`
-	Was               string          `json:"was,omitempty"` // the queued text the client saw at Index
-	To                int             `json:"to,omitzero"`
-	Branch            *Branch         `json:"branch,omitempty"`  // what rewind leaves
-	Request           jsontext.Value  `json:"request,omitzero"`  // ask: the control request
-	Proto             int             `json:"proto,omitzero"`    // hello: the client's protocol
-	Resume            bool            `json:"resume,omitzero"`   // hello: a tail or a resume, not the whole replay
-	After             string          `json:"after,omitempty"`   // hello: the position to resume after
-	Without           []string        `json:"without,omitempty"` // without: what the session goes without
-	Away              *Away           `json:"away,omitempty"`    // away: nil comes back
+	ExpectedSession   string            `json:"expectedSession,omitempty"`
+	ExpectedUpdatedAt time.Time         `json:"expectedUpdatedAt,omitzero"`
+	Op                string            `json:"op"`
+	Exchange          *event.Exchange   `json:"exchange,omitempty"`
+	Text              string            `json:"text,omitempty"`
+	ID                string            `json:"id,omitempty"`
+	Always            bool              `json:"always,omitzero"`
+	Input             jsontext.Value    `json:"input,omitzero"`
+	Message           string            `json:"message,omitempty"`
+	Interrupt         bool              `json:"interrupt,omitzero"`
+	Mode              string            `json:"mode,omitempty"`
+	Model             string            `json:"model,omitempty"`
+	Effort            string            `json:"effort,omitempty"`
+	Now               bool              `json:"now,omitzero"`
+	Guide             bool              `json:"guide,omitzero"` // send: into the turn under way, not stopping it
+	Images            []string          `json:"images,omitempty"`
+	Index             int               `json:"index,omitzero"`
+	Was               string            `json:"was,omitempty"` // the queued text the client saw at Index
+	To                int               `json:"to,omitzero"`
+	Branch            *Branch           `json:"branch,omitempty"`  // what rewind leaves
+	Request           jsontext.Value    `json:"request,omitzero"`  // ask: the control request
+	Proto             int               `json:"proto,omitzero"`    // hello: the client's protocol
+	Resume            bool              `json:"resume,omitzero"`   // hello: a tail or a resume, not the whole replay
+	After             string            `json:"after,omitempty"`   // hello: the position to resume after
+	Without           []string          `json:"without,omitempty"` // without: what the session goes without
+	MCP               []agent.MCPServer `json:"mcp,omitempty"`     // mcp: servers to add to the session's own
+	Away              *Away             `json:"away,omitempty"`    // away: nil comes back
 }
 
 func (s *server) do(o op) error {
@@ -1884,6 +1898,40 @@ func (s *server) do(o op) error {
 			stopAgent(conn)
 			return nil
 		}
+	case "mcp":
+		// Servers the session doesn't run yet join its own and are kept
+		// with it. An agent that takes them live gets the whole set at
+		// once, mid-turn too; any other when one next starts: right away
+		// when idle.
+		servers, added := withMCP(s.cfg.MCP, o.MCP)
+		if !added {
+			s.mu.Unlock()
+			return nil
+		}
+		if len(servers) > agent.MCPMost {
+			s.mu.Unlock()
+			return fmt.Errorf("a session runs at most %d MCP servers of its caller's", agent.MCPMost)
+		}
+		s.cfg.MCP = servers
+		s.saveConfig()
+		if ms, ok := conn.(agent.MCPSetter); ok {
+			s.mu.Unlock()
+			err := ms.SetMCP(slices.Clone(servers))
+			s.mu.Lock()
+			if err == nil || s.conn != conn {
+				s.mu.Unlock()
+				return nil // taken live, or a fresh agent started with them
+			}
+		}
+		if conn != nil && s.conn == conn && s.info.State == "idle" {
+			s.detach()
+			s.publish()
+			s.mu.Unlock()
+			stopAgent(conn)
+			return nil
+		}
+		s.mu.Unlock()
+		return nil
 	case "effort":
 		// Effort is fixed for an agent's process, so it takes hold the next
 		// time one starts: right away when idle, else after this turn.

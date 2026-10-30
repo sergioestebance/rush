@@ -194,7 +194,7 @@ func TestSetMCPGivesClaudeCodeTheServersLive(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 	_ = conn.Close()
-	wantIn(t, log, `"subtype":"mcp_set_servers"`, `"servers":{"amtana-threads":{"type":"stdio","command":"/run/threads-mcp","env":{"AMTANA_TOOL_TOKEN":"tok"}}}`)
+	wantIn(t, log, `"subtype":"mcp_set_servers"`, `"servers":{"amtana-threads":{"command":"/run/threads-mcp","env":{"AMTANA_TOOL_TOKEN":"tok"},"type":"stdio"}}`)
 	b, _ := os.ReadFile(log)
 	allowed := false
 	for _, l := range strings.Split(string(b), "\n") {

@@ -535,6 +535,10 @@ func (c *Client) SetEffort(e string) error { return c.do(op{Op: "effort", Effort
 // start: at once when it's idle.
 func (c *Client) SetWithout(w []string) error { return c.do(op{Op: "without", Without: w}) }
 
+// AddMCP adds MCP servers to the session's own, by name; a name it runs
+// already is kept as it was.
+func (c *Client) AddMCP(servers []agent.MCPServer) error { return c.do(op{Op: "mcp", MCP: servers}) }
+
 // Rewind carries on from another conversation, sessionID: a copy cut
 // before one of your messages (resume), a fresh one, or one of its
 // Branches. The path it leaves is kept as a branch, as left describes it.

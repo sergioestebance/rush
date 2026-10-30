@@ -186,7 +186,7 @@ func TestOpMCPOnlyFromServeFolders(t *testing.T) {
 		t.Fatalf("host got %v", got)
 	}
 	b, _ := jsonx.Marshal(got["mcp"])
-	if want := `[{"name":"amtana-threads","command":"` + prog + `","args":["serve"],"env":{"AMTANA_TOOL_TOKEN":"tok"}}]`; string(b) != want {
+	if want := `[{"args":["serve"],"command":"` + prog + `","env":{"AMTANA_TOOL_TOKEN":"tok"},"name":"amtana-threads"}]`; string(b) != want {
 		t.Fatalf("host got mcp %s\nwant %s", b, want)
 	}
 	for name, c := range map[string]struct {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"errors"
+	"fmt"
 	"maps"
 	"mime"
 	"os"
@@ -69,7 +70,11 @@ func (a Adapter) Start(ctx context.Context, o agent.StartOptions) (agent.Conn, e
 		b, _ := jsonx.Marshal(map[string]any{"hooks": hooks})
 		ho.Flags = append(ho.Flags, "--settings", string(b))
 	}
-	ho.Flags = append(ho.Flags, mcpFlags(o.MCP)...)
+	mcp, err := mcpFlags(o.MCP, o.TempDir)
+	if err != nil {
+		return nil, err
+	}
+	ho.Flags = append(ho.Flags, mcp...)
 	ho.Flags = append(ho.Flags, o.Flags...)
 	if len(o.Carry) > 0 && !o.Resume && !o.Fork && o.SessionID != "" {
 		// Another agent's conversation, resumed as this one's own.
@@ -161,7 +166,7 @@ type conn struct {
 	s         *headless.Session
 	events    chan event.Event
 	tools     []agent.ToolServer
-	mcp       []agent.MCPServer // the caller's own, run by Claude Code
+	mcp       []agent.MCPServer // the caller's own, run by Claude Code; under mu once it runs
 	initID    string
 	initDone  chan struct{}
 	initError string
@@ -212,27 +217,79 @@ func (c *conn) trusted() []string {
 	return out
 }
 
-// mcpFlags give Claude Code a caller's MCP servers, beside rush's own.
-func mcpFlags(servers []agent.MCPServer) []string {
-	if len(servers) == 0 {
-		return nil
-	}
-	type stdio struct {
-		Type    string   `json:"type"`
-		Command string   `json:"command"`
-		Args    []string `json:"args,omitempty"`
-	}
-	cfg := map[string]stdio{}
+// stdioServer is one of a caller's MCP servers in Claude Code's own words.
+type stdioServer struct {
+	Type    string            `json:"type"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+}
+
+// mcpConfig is servers in Claude Code's own words, by name.
+func mcpConfig(servers []agent.MCPServer) map[string]stdioServer {
+	cfg := map[string]stdioServer{}
 	for _, m := range servers {
-		cfg[m.Name] = stdio{Type: "stdio", Command: m.Command, Args: m.Args}
+		cfg[m.Name] = stdioServer{Type: "stdio", Command: m.Command, Args: m.Args, Env: m.Env}
 	}
-	b, _ := jsonx.Marshal(map[string]any{"mcpServers": cfg})
-	return []string{"--mcp-config", string(b)}
+	return cfg
+}
+
+// mcpFlags give Claude Code a caller's MCP servers, beside rush's own. With
+// a scratch folder dir the config is a file there only the user reads, so a
+// server's environment (a token, say) never shows on the command line.
+func mcpFlags(servers []agent.MCPServer, dir string) ([]string, error) {
+	if len(servers) == 0 {
+		return nil, nil
+	}
+	b, _ := jsonx.Marshal(map[string]any{"mcpServers": mcpConfig(servers)})
+	if dir == "" {
+		return []string{"--mcp-config", string(b)}, nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "mcp-config.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return nil, err
+	}
+	return []string{"--mcp-config", path}, nil
+}
+
+// SetMCP gives the running Claude Code the caller's MCP servers with the
+// mcp_set_servers control request, which takes hold at once, mid-turn too.
+// The request replaces the servers --mcp-config gave, so servers is the
+// whole set. Their tools are trusted from now on, though --allowedTools,
+// fixed at the start, never named them.
+func (c *conn) SetMCP(servers []agent.MCPServer) error {
+	c.mu.Lock()
+	was := c.mcp
+	c.mcp = slices.Clone(servers)
+	c.mu.Unlock()
+	req, _ := jsonx.Marshal(map[string]any{"subtype": "mcp_set_servers", "servers": mcpConfig(servers)})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	body, err := c.Ask(ctx, req)
+	var res struct {
+		Errors map[string]jsontext.Value `json:"errors"`
+	}
+	if err == nil && jsonx.Unmarshal(body, &res) == nil && len(res.Errors) > 0 {
+		err = fmt.Errorf("Claude Code did not start the MCP servers: %s", body)
+	}
+	if err != nil {
+		c.mu.Lock()
+		c.mcp = was
+		c.mu.Unlock()
+	}
+	return err
 }
 
 func (c *conn) isTrusted(name string) bool {
-	t, n, ok := c.tool(name)
-	return ok && slices.Contains(t.Trusted, n)
+	if t, n, ok := c.tool(name); ok {
+		return slices.Contains(t.Trusted, n)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.ContainsFunc(c.mcp, func(m agent.MCPServer) bool { return strings.HasPrefix(name, "mcp__"+m.Name+"__") })
 }
 
 // ownTraffic is a control request for rush's own tools: an MCP message, or

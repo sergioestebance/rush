@@ -90,18 +90,23 @@ type StartRequest struct {
 	MCP map[string]MCPSpec `json:"mcp,omitempty"`
 }
 
-// MCPSpec is one MCP server a start asks for: its program, by full path,
-// and its arguments.
+// MCPSpec is one MCP server a start or an mcp op asks for: its program,
+// by full path, its arguments, and what it adds to its environment.
 type MCPSpec struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args,omitempty"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
 }
 
 // MCPList is MCP as the host takes it, in name order.
-func (r StartRequest) MCPList() []agent.MCPServer {
-	out := make([]agent.MCPServer, 0, len(r.MCP))
-	for _, k := range slices.Sorted(maps.Keys(r.MCP)) {
-		out = append(out, agent.MCPServer{Name: k, Command: r.MCP[k].Command, Args: r.MCP[k].Args})
+func (r StartRequest) MCPList() []agent.MCPServer { return mcpList(r.MCP) }
+
+// mcpList is servers as the host takes them, in name order.
+func mcpList(servers map[string]MCPSpec) []agent.MCPServer {
+	out := make([]agent.MCPServer, 0, len(servers))
+	for _, k := range slices.Sorted(maps.Keys(servers)) {
+		m := servers[k]
+		out = append(out, agent.MCPServer{Name: k, Command: m.Command, Args: m.Args, Env: m.Env})
 	}
 	return out
 }
@@ -413,10 +418,25 @@ func (s *Server) allowedProgram(req StartRequest) error {
 	if len(s.Programs) == 0 {
 		return errors.New("this serve runs only the agents' own programs, with their own environment")
 	}
-	if len(req.Env) > 64 {
+	if err := allowedEnv(req.Env); err != nil {
+		return err
+	}
+	if err := s.allowedMCP(req.MCP); err != nil {
+		return err
+	}
+	if req.Binary == "" {
+		return nil
+	}
+	return s.servesProgram(req.Binary)
+}
+
+// allowedEnv is whether env may be added to an agent's or a server's
+// environment: at most 64 variables, none of rush's own.
+func allowedEnv(env map[string]string) error {
+	if len(env) > 64 {
 		return errors.New("at most 64 environment variables")
 	}
-	for k, v := range req.Env {
+	for k, v := range env {
 		if k == "" || strings.ContainsAny(k, "=\x00") || strings.ContainsRune(v, 0) {
 			return fmt.Errorf("the environment variable %q can't be set", k)
 		}
@@ -424,21 +444,34 @@ func (s *Server) allowedProgram(req StartRequest) error {
 			return fmt.Errorf("%s is rush's own", k)
 		}
 	}
-	if len(req.MCP) > 16 {
-		return errors.New("at most 16 MCP servers")
+	return nil
+}
+
+// allowedMCP is whether servers are MCP servers this serve runs, for a
+// start or an mcp op: none without Programs, each program from one of
+// those folders, no name and no variable of rush's own.
+func (s *Server) allowedMCP(servers map[string]MCPSpec) error {
+	if len(servers) == 0 {
+		return nil
 	}
-	for name, m := range req.MCP {
+	if len(s.Programs) == 0 {
+		return errors.New("this serve runs only the agents' own programs, with their own environment")
+	}
+	if len(servers) > agent.MCPMost {
+		return fmt.Errorf("at most %d MCP servers", agent.MCPMost)
+	}
+	for name, m := range servers {
 		if !mcpName.MatchString(name) || name == agtools.Server {
 			return fmt.Errorf("an MCP server can't be named %q", name)
 		}
 		if err := s.servesProgram(m.Command); err != nil {
 			return fmt.Errorf("MCP server %s: %w", name, err)
 		}
+		if err := allowedEnv(m.Env); err != nil {
+			return fmt.Errorf("MCP server %s: %w", name, err)
+		}
 	}
-	if req.Binary == "" {
-		return nil
-	}
-	return s.servesProgram(req.Binary)
+	return nil
 }
 
 // mcpName is a name fit for an MCP server: what an agent puts in its tools' names.
@@ -484,11 +517,12 @@ func validID(id string) bool {
 
 // remoteOps are the ops a remote client may send a host: answering,
 // steering and stopping its agent, its queue, going away and coming back,
-// and what it waits on at a limit. Rewinds, compacting and relogins work on
+// what it waits on at a limit, and MCP servers to add (mcp, on the
+// terms of a start's). Rewinds, compacting and relogins work on
 // files or accounts the client has only on its own machine, so they stay
 // with the terminal there.
 var remoteOps = []string{"send", "allow", "deny", "interrupt", "stop", "stop_task", "background",
-	"model", "effort", "mode", "without", "tell", "context", "limit", "away", "name",
+	"model", "effort", "mode", "without", "mcp", "tell", "context", "limit", "away", "name",
 	"queue_edit", "queue_remove", "queue_move", "queue_merge", "queue_send", "queue_hold", "queue_separate"}
 
 // remoteOp is the part of a host op a remote client may set: never a
@@ -511,6 +545,8 @@ type remoteOp struct {
 	To        int            `json:"to,omitzero"`
 	Without   []string       `json:"without,omitempty"`
 	Away      *host.Away     `json:"away,omitempty"`
+	// MCP are an mcp op's servers by name, as a start's mcp.
+	MCP map[string]MCPSpec `json:"mcp,omitempty"`
 	// Pictures are a send's images as bytes: serve writes them to the
 	// session's scratch folder here, so no path ever crosses.
 	Pictures []Picture `json:"pictures,omitempty"`
@@ -590,8 +626,18 @@ func (s *Server) op(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "only a message takes images")
 		return
 	}
+	if (o.Op == "mcp") != (len(o.MCP) > 0) {
+		fail(w, http.StatusBadRequest, "an mcp op, and only one, names MCP servers")
+		return
+	}
+	if err := s.allowedMCP(o.MCP); err != nil {
+		fail(w, http.StatusForbidden, err.Error())
+		return
+	}
 	info, err := host.ReadInfo(id)
-	if o.Op == "send" && (err != nil || !host.Alive(info.HostPID)) {
+	// A send wakes a stopped session, and so does an mcp op: the servers
+	// are kept with it, for its agent's next start.
+	if (o.Op == "send" || o.Op == "mcp") && (err != nil || !host.Alive(info.HostPID)) {
 		err = host.Ensure(id)
 	} else if err == nil && !host.Alive(info.HostPID) {
 		err = errors.New("the session isn't running")
@@ -613,6 +659,13 @@ func (s *Server) op(w http.ResponseWriter, r *http.Request) {
 	}
 	o.Pictures = nil
 	b, _ := jsonx.Marshal(o)
+	if o.Op == "mcp" {
+		// The host takes servers as a list, each with its name.
+		b, _ = jsonx.Marshal(struct {
+			Op  string            `json:"op"`
+			MCP []agent.MCPServer `json:"mcp"`
+		}{o.Op, mcpList(o.MCP)})
+	}
 	if err := c.Op(b, images...); err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
