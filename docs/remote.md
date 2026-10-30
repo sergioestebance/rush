@@ -43,8 +43,18 @@ server in front of those hosts. This is the simpler plan that replaced
     `mcp` adds MCP servers to a running session on a start's terms; a name
     it runs already is kept as it was. Claude Code gets the whole set at
     once with its `mcp_set_servers` control request, mid-turn too, and
-    trusts their tools; another agent restarts on its conversation when
-    idle, else takes them at its next start. A send's images come as
+    trusts their tools. That request replaces every server rush gave it,
+    rush's own in-process ones (`initialize`'s `sdkMcpServers`) too, so it
+    names each of those as a `{"type":"sdk"}` entry beside the caller's.
+    Another agent restarts on its conversation when idle, else takes them
+    at its next start. Unlike other ops, `mcp` answers only once the host
+    has: 202 when the agent has the servers or will at its next start, 502
+    with the host's reason when a busy agent refused them live (a later
+    `mcp` naming the same servers tries again), 504 when the host doesn't
+    answer within 45 s. A server's `env` rests in the session's
+    `config.json` (0600, for a resume) and, for Claude Code, in the
+    session's `tmp/mcp-config.json` (0600, so it is never on a command
+    line), which goes when that Claude Code exits. A send's images come as
     bytes (`pictures`: png, jpeg, gif or webp, at most 8, each under 20 MB, 64 MB a message);
     serve writes them to the session's scratch folder and the host reads them
     from there, so no client path ever reaches the agent.
