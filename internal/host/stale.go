@@ -1,8 +1,12 @@
 package host
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"time"
+
+	"github.com/0xdeafcafe/rush/internal/agent"
 
 	"github.com/0xdeafcafe/photon/uithread"
 )
@@ -81,4 +85,26 @@ func (l *Lister) Sweep(installed BinStamp, restart bool) (stale, restarted int) 
 		}
 	}
 	return stale, restarted
+}
+
+// TakesMCP is whether the host takes an mcp op: one from before MCPFrom
+// never answers it.
+func (i Info) TakesMCP() bool { return i.Proto >= MCPFrom }
+
+// RestartWithMCP restarts session id's host on this rush with servers
+// added to its own, by name, as an mcp op adds them: for a host from
+// before mcp ops. Its agent carries on its conversation with them. It
+// stops whatever the session is doing, so only between turns.
+func RestartWithMCP(id string, servers []agent.MCPServer) error {
+	cfg, err := ReadConfig(id)
+	if err != nil {
+		return err
+	}
+	if cfg.Owner > 0 {
+		return errors.New("a stand-in's host ends with the program that started it")
+	}
+	if all, _ := withMCP(cfg.MCP, servers); len(all) > agent.MCPMost {
+		return fmt.Errorf("a session runs at most %d MCP servers of its caller's", agent.MCPMost)
+	}
+	return Restart(id, func(cfg *Config) { cfg.MCP, _ = withMCP(cfg.MCP, servers) })
 }

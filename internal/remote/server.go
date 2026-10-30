@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/0xdeafcafe/photon/jsonx"
@@ -49,6 +50,14 @@ type Server struct {
 	Programs []string
 	// Push sends notifications, when set up.
 	Push *Push
+	// RestartMCP restarts a session's host on this rush with MCP servers
+	// added, for an mcp op to a host from before mcp ops; nil is
+	// host.RestartWithMCP.
+	RestartMCP func(id string, servers []agent.MCPServer) error
+
+	// quietRestarts are the sessions whose host from before mcp ops waits
+	// for its turn to end, to be restarted with MCP servers.
+	quietRestarts sync.Map
 
 	pairs pairCodes
 	devs  devices
@@ -478,6 +487,60 @@ func (s *Server) allowedMCP(servers map[string]MCPSpec) error {
 // 30 s its agent has to start the servers live.
 const mcpWait = 45 * time.Second
 
+// quietPoll is how often serve looks whether a host from before mcp ops
+// that an mcp op found mid-turn is between turns yet.
+var quietPoll = time.Second
+
+// quietWaitMost is how long serve waits for that host's turn to end.
+const quietWaitMost = 24 * time.Hour
+
+// mcpByRestart answers an mcp op to session id's host from before mcp
+// ops, which never answers one: it restarts the host on this rush with
+// servers, at once between turns (202 once the new host runs), else once
+// the turn has ended (409 now, so the caller tries again).
+func (s *Server) mcpByRestart(w http.ResponseWriter, id string, info host.Info, servers []agent.MCPServer) {
+	if info.Quiet() {
+		if err := s.restartMCP(id, servers); err != nil {
+			fail(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	s.restartWhenQuiet(id, servers)
+	fail(w, http.StatusConflict, "the session's host is from before mcp ops: it is restarted with the servers when its turn has ended")
+}
+
+func (s *Server) restartMCP(id string, servers []agent.MCPServer) error {
+	if s.RestartMCP != nil {
+		return s.RestartMCP(id, servers)
+	}
+	return host.RestartWithMCP(id, servers)
+}
+
+// restartWhenQuiet restarts session id's host from before mcp ops with
+// servers once it is between turns, one wait a session: a later op's
+// servers while one waits are left to the op after the restart, which the
+// new host takes itself. A host that ends or is current by then is left.
+func (s *Server) restartWhenQuiet(id string, servers []agent.MCPServer) {
+	if _, waiting := s.quietRestarts.LoadOrStore(id, true); waiting {
+		return
+	}
+	go func() {
+		defer s.quietRestarts.Delete(id)
+		for end := time.Now().Add(quietWaitMost); time.Now().Before(end); time.Sleep(quietPoll) {
+			info, err := host.ReadInfo(id)
+			if err != nil || !host.Alive(info.HostPID) || info.TakesMCP() {
+				return
+			}
+			if info.Quiet() {
+				_ = s.restartMCP(id, servers)
+				return
+			}
+		}
+	}()
+}
+
 // awaitReply waits on c for the host's answer to the op with id: nil once
 // it took it, else its reason and the status to answer with it.
 func awaitReply(c *host.Client, id string, wait time.Duration) (int, error) {
@@ -665,13 +728,18 @@ func (s *Server) op(w http.ResponseWriter, r *http.Request) {
 	info, err := host.ReadInfo(id)
 	// A send wakes a stopped session, and so does an mcp op: the servers
 	// are kept with it, for its agent's next start.
+	woke := false
 	if (o.Op == "send" || o.Op == "mcp") && (err != nil || !host.Alive(info.HostPID)) {
-		err = host.Ensure(id)
+		err, woke = host.Ensure(id), true
 	} else if err == nil && !host.Alive(info.HostPID) {
 		err = errors.New("the session isn't running")
 	}
 	if err != nil {
 		fail(w, http.StatusConflict, err.Error())
+		return
+	}
+	if o.Op == "mcp" && !woke && !info.TakesMCP() {
+		s.mcpByRestart(w, id, info, mcpList(o.MCP))
 		return
 	}
 	c, err := host.Dial(id)

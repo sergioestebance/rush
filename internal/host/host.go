@@ -260,7 +260,12 @@ type Task struct {
 // 6 Claude Code's sessions as rush's own events too, to a client that
 // says it reads them, 7 steering with a queued message (queue_send's
 // guide). A client sends its build's in the hello.
-const Proto = 12 // numbered frames, resume; 11 away; 10 idle host sleep; 9 guarded compaction; 8 exchanges
+const Proto = 13 // mcp ops; 12 numbered frames, resume; 11 away; 10 idle host sleep; 9 guarded compaction; 8 exchanges
+
+// MCPFrom is the first Proto whose host takes an mcp op and answers it.
+// One from before runs on an older rush: it gets MCP servers only by a
+// restart on this one (RestartWithMCP).
+const MCPFrom = 13
 
 // Limit describes a usage limit that stopped the session.
 type Limit struct {
