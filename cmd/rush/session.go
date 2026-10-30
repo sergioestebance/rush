@@ -267,6 +267,8 @@ type startOpts struct {
 	Meta                                                                     map[string]string
 	// ForkFrom starts a new session as a copy of this conversation.
 	ForkFrom string
+	// MCP are the caller's own MCP servers, in place of any it ran with.
+	MCP []agent.MCPServer
 }
 
 // startSession starts a session, or with Resume brings a stopped one
@@ -353,6 +355,9 @@ func startSession(o startOpts) (host.Info, error) {
 	cfg.Binary = or(binary, cfg.Binary)
 	if len(env) > 0 {
 		cfg.Env = env
+	}
+	if len(o.MCP) > 0 {
+		cfg.MCP = o.MCP
 	}
 	if metaMap != nil {
 		if cfg.Meta == nil {

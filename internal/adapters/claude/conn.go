@@ -35,7 +35,7 @@ func (a Adapter) Start(ctx context.Context, o agent.StartOptions) (agent.Conn, e
 		}
 	}
 	c := &conn{events: make(chan event.Event, 64), asks: map[string]headless.PermissionRequest{},
-		waits: map[string]chan headless.ControlReply{}, acct: acct, root: root, tools: slices.Clone(o.Tools),
+		waits: map[string]chan headless.ControlReply{}, acct: acct, root: root, tools: slices.Clone(o.Tools), mcp: o.MCP,
 		done: make(chan struct{}), initDone: make(chan struct{}), taps: o.Tap != nil}
 	ho := headless.Options{Account: acct, Dir: o.Dir, Model: o.Model, Effort: o.Effort,
 		PermissionMode: o.Mode, Binary: o.Binary}
@@ -69,6 +69,7 @@ func (a Adapter) Start(ctx context.Context, o agent.StartOptions) (agent.Conn, e
 		b, _ := jsonx.Marshal(map[string]any{"hooks": hooks})
 		ho.Flags = append(ho.Flags, "--settings", string(b))
 	}
+	ho.Flags = append(ho.Flags, mcpFlags(o.MCP)...)
 	ho.Flags = append(ho.Flags, o.Flags...)
 	if len(o.Carry) > 0 && !o.Resume && !o.Fork && o.SessionID != "" {
 		// Another agent's conversation, resumed as this one's own.
@@ -160,6 +161,7 @@ type conn struct {
 	s         *headless.Session
 	events    chan event.Event
 	tools     []agent.ToolServer
+	mcp       []agent.MCPServer // the caller's own, run by Claude Code
 	initID    string
 	initDone  chan struct{}
 	initError string
@@ -204,7 +206,28 @@ func (c *conn) trusted() []string {
 			out = append(out, "mcp__"+t.Name+"__"+n)
 		}
 	}
+	for _, m := range c.mcp {
+		out = append(out, "mcp__"+m.Name) // the caller chose it: every tool of its
+	}
 	return out
+}
+
+// mcpFlags give Claude Code a caller's MCP servers, beside rush's own.
+func mcpFlags(servers []agent.MCPServer) []string {
+	if len(servers) == 0 {
+		return nil
+	}
+	type stdio struct {
+		Type    string   `json:"type"`
+		Command string   `json:"command"`
+		Args    []string `json:"args,omitempty"`
+	}
+	cfg := map[string]stdio{}
+	for _, m := range servers {
+		cfg[m.Name] = stdio{Type: "stdio", Command: m.Command, Args: m.Args}
+	}
+	b, _ := jsonx.Marshal(map[string]any{"mcpServers": cfg})
+	return []string{"--mcp-config", string(b)}
 }
 
 func (c *conn) isTrusted(name string) bool {

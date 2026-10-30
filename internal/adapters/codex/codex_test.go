@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -139,6 +140,28 @@ func TestHandshake(t *testing.T) {
 	want := event.Init{SessionID: "th1", Model: "gpt-5.5", Cwd: "/work", Mode: "auto", Version: "0.155.1"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("init = %#v, want %#v", got, want)
+	}
+}
+
+// A caller's MCP servers start with the thread, the session's environment
+// passed on.
+func TestThreadStartCallerMCP(t *testing.T) {
+	cr, fw := io.Pipe()
+	fr, cw := io.Pipe()
+	f := &fake{t: t, in: bufio.NewScanner(fr), out: fw}
+	c := newConn(context.Background())
+	defer c.Close()
+	go func() {
+		_ = c.begin(newClient(cr, cw, c.handle), agent.StartOptions{Dir: "/w", Env: []string{"AMTANA_TOOL_TOKEN=t"},
+			MCP: []agent.MCPServer{{Name: "amtana-threads", Command: "/run/amtana", Args: []string{"threads-mcp"}}}})
+	}()
+	f.respond(f.expect("initialize").ID, map[string]any{"userAgent": "rush/1"})
+	f.expect("initialized")
+	cfg, _ := params(t, f.expect("thread/start"))["config"].(map[string]any)
+	srv, _ := cfg["mcp_servers.amtana-threads"].(map[string]any)
+	if srv["command"] != "/run/amtana" || !reflect.DeepEqual(srv["args"], []any{"threads-mcp"}) ||
+		!slices.Contains(srv["env_vars"].([]any), any("AMTANA_TOOL_TOKEN")) {
+		t.Fatalf("config = %v", cfg)
 	}
 }
 

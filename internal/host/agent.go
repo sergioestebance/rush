@@ -62,7 +62,7 @@ func (s *server) start() error {
 		Dir:     s.cfg.Cwd, SessionID: s.cfg.SessionID, Resume: s.began && s.cfg.SessionID != "", Fork: s.began && s.cfg.Fork,
 		ForkFrom: s.cfg.ForkFrom,
 		Model:    s.cfg.Model, Effort: s.cfg.Effort, Mode: s.cfg.PermissionMode,
-		Env: append(append([]string{"TMPDIR=" + tmp}, s.shimEnv()...), s.cfg.Env...), Flags: s.cfg.Flags, Binary: s.cfg.Binary, Without: s.cfg.Without,
+		Env: append(append([]string{"TMPDIR=" + tmp}, s.shimEnv()...), s.cfg.Env...), Flags: s.cfg.Flags, MCP: s.cfg.MCP, Binary: s.cfg.Binary, Without: s.cfg.Without,
 		TempDir: tmp, Lean: s.cfg.Lean, Subagents: agent.SubagentCap(), Tap: s.tap, Lightly: true,
 		// rush's own tools never ask: they draw, or start what the Agent tool would.
 		Tools: []agent.ToolServer{{Name: agtools.Server, Trusted: agtools.Names(), Handle: agtools.Handler(AgentTools(s.cfg.ID)),

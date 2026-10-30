@@ -130,6 +130,8 @@ type StartOptions struct {
 	Subagents int
 	// Tools are MCP servers rush serves in process for the session.
 	Tools []ToolServer
+	// MCP are servers of the caller's own, run by the agent as processes.
+	MCP []MCPServer
 	// Agents are subagents to offer it, by name, each defined in its
 	// agent's own words; Prompt is added to its system prompt.
 	Agents map[string]jsontext.Value

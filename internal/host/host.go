@@ -59,6 +59,8 @@ type Config struct {
 	// (for Claude Code, tool rules: an MCP server, a subagent, a skill), so
 	// what it never uses isn't in its context.
 	Without []string `json:"without,omitempty"`
+	// MCP are the caller's own MCP servers the agent runs (remote.StartRequest).
+	MCP []agent.MCPServer `json:"mcp,omitempty"`
 	// From is the conversation this one continues, for showing its history
 	// (a fork's own transcript may start empty).
 	From           string          `json:"from,omitempty"`

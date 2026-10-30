@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -134,5 +135,22 @@ func TestAnswersKeepTheQuestion(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("%s is missing %s", got, want)
 		}
+	}
+}
+
+// A caller's MCP servers reach Claude Code as one config beside rush's
+// own, every tool of theirs trusted.
+func TestCallerMCPConfig(t *testing.T) {
+	if f := mcpFlags(nil); f != nil {
+		t.Fatalf("none: %v", f)
+	}
+	f := mcpFlags([]agent.MCPServer{{Name: "amtana-threads", Command: "/run/amtana", Args: []string{"threads-mcp"}}})
+	want := []string{"--mcp-config", `{"mcpServers":{"amtana-threads":{"type":"stdio","command":"/run/amtana","args":["threads-mcp"]}}}`}
+	if !slices.Equal(f, want) {
+		t.Fatalf("flags = %q", f)
+	}
+	c := &conn{mcp: []agent.MCPServer{{Name: "amtana-threads"}}}
+	if !slices.Contains(c.trusted(), "mcp__amtana-threads") {
+		t.Fatalf("trusted = %v", c.trusted())
 	}
 }

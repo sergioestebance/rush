@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/0xdeafcafe/photon/jsonx"
 	"github.com/0xdeafcafe/rush/internal/agent"
 	"github.com/0xdeafcafe/rush/internal/agent/event"
+	"github.com/0xdeafcafe/rush/internal/agtools"
 	"github.com/0xdeafcafe/rush/internal/host"
 	"github.com/0xdeafcafe/rush/internal/state"
 )
@@ -83,6 +85,25 @@ type StartRequest struct {
 	Binary string `json:"binary,omitempty"`
 	// Env is added to the agent's environment, on a serve with Programs.
 	Env map[string]string `json:"env,omitempty"`
+	// MCP are MCP servers the agent runs beside rush's own, by name, each
+	// program from one of serve's Programs folders.
+	MCP map[string]MCPSpec `json:"mcp,omitempty"`
+}
+
+// MCPSpec is one MCP server a start asks for: its program, by full path,
+// and its arguments.
+type MCPSpec struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+}
+
+// MCPList is MCP as the host takes it, in name order.
+func (r StartRequest) MCPList() []agent.MCPServer {
+	out := make([]agent.MCPServer, 0, len(r.MCP))
+	for _, k := range slices.Sorted(maps.Keys(r.MCP)) {
+		out = append(out, agent.MCPServer{Name: k, Command: r.MCP[k].Command, Args: r.MCP[k].Args})
+	}
+	return out
 }
 
 // EnvList is Env as the host takes it, KEY=value, in name order.
@@ -386,7 +407,7 @@ func (s *Server) allowedCwd(dir string) error {
 // this serve takes: none at all without Programs, the program a file run
 // from one of those folders, and no variable of rush's own.
 func (s *Server) allowedProgram(req StartRequest) error {
-	if req.Binary == "" && len(req.Env) == 0 {
+	if req.Binary == "" && len(req.Env) == 0 && len(req.MCP) == 0 {
 		return nil
 	}
 	if len(s.Programs) == 0 {
@@ -403,17 +424,37 @@ func (s *Server) allowedProgram(req StartRequest) error {
 			return fmt.Errorf("%s is rush's own", k)
 		}
 	}
+	if len(req.MCP) > 16 {
+		return errors.New("at most 16 MCP servers")
+	}
+	for name, m := range req.MCP {
+		if !mcpName.MatchString(name) || name == agtools.Server {
+			return fmt.Errorf("an MCP server can't be named %q", name)
+		}
+		if err := s.servesProgram(m.Command); err != nil {
+			return fmt.Errorf("MCP server %s: %w", name, err)
+		}
+	}
 	if req.Binary == "" {
 		return nil
 	}
-	if !filepath.IsAbs(req.Binary) {
+	return s.servesProgram(req.Binary)
+}
+
+// mcpName is a name fit for an MCP server: what an agent puts in its tools' names.
+var mcpName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// servesProgram is whether prog is a program in one of this serve's
+// Programs folders.
+func (s *Server) servesProgram(prog string) error {
+	if !filepath.IsAbs(prog) {
 		return errors.New("the program must be a full path")
 	}
-	if st, err := os.Stat(req.Binary); err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
-		return fmt.Errorf("%s isn't a program on this machine", req.Binary)
+	if st, err := os.Stat(prog); err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("%s isn't a program on this machine", prog)
 	}
 	for _, d := range s.Programs {
-		if within(req.Binary, d) {
+		if within(prog, d) {
 			return nil
 		}
 	}
