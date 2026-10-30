@@ -405,6 +405,9 @@ type server struct {
 	limited   *event.Limited       // the limit that stopped this turn, if one did
 	wake      *time.Timer          // a scheduled continue or retry
 	gen       int                  // bumped by every send; a stale timer does nothing
+	// mcpBehind is the running agent when it refused the session's MCP
+	// servers live: a later mcp op hands it them again.
+	mcpBehind agent.Conn
 	// waiting is when a message went to the agent that it hasn't begun
 	// answering: zero once it has (see stillWorking).
 	waiting time.Time
@@ -1904,7 +1907,7 @@ func (s *server) do(o op) error {
 		// once, mid-turn too; any other when one next starts: right away
 		// when idle.
 		servers, added := withMCP(s.cfg.MCP, o.MCP)
-		if !added {
+		if !added && (conn == nil || s.mcpBehind != conn) {
 			s.mu.Unlock()
 			return nil
 		}
@@ -1914,21 +1917,30 @@ func (s *server) do(o op) error {
 		}
 		s.cfg.MCP = servers
 		s.saveConfig()
+		var refused error
 		if ms, ok := conn.(agent.MCPSetter); ok {
 			s.mu.Unlock()
-			err := ms.SetMCP(slices.Clone(servers))
+			refused = ms.SetMCP(slices.Clone(servers))
 			s.mu.Lock()
-			if err == nil || s.conn != conn {
+			if refused == nil || s.conn != conn {
+				s.mcpBehind = nil
 				s.mu.Unlock()
 				return nil // taken live, or a fresh agent started with them
 			}
 		}
 		if conn != nil && s.conn == conn && s.info.State == "idle" {
+			s.mcpBehind = nil
 			s.detach()
 			s.publish()
 			s.mu.Unlock()
 			stopAgent(conn)
 			return nil
+		}
+		if refused != nil {
+			// Busy, it runs on without them: the caller may try again.
+			s.mcpBehind = conn
+			s.mu.Unlock()
+			return fmt.Errorf("the agent did not take the MCP servers: %w", refused)
 		}
 		s.mu.Unlock()
 		return nil
@@ -2312,7 +2324,16 @@ func (s *server) serve(nc net.Conn) {
 		if jsonx.Unmarshal(sc.Bytes(), &o) != nil {
 			continue
 		}
-		if err := s.do(o); err != nil {
+		err := s.do(o)
+		if o.Op == "mcp" && o.ID != "" {
+			// Its answer, for the client that waits on it (serve's mcp op).
+			msg := ""
+			if err != nil {
+				msg = err.Error()
+			}
+			b, _ := jsonx.Marshal(map[string]any{"type": typeReply, "id": o.ID, "error": msg})
+			c.push(b)
+		} else if err != nil {
 			b, _ := jsonx.Marshal(map[string]string{"type": "agtop_error", "error": err.Error()})
 			c.push(b)
 		}

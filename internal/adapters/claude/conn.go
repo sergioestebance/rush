@@ -74,6 +74,9 @@ func (a Adapter) Start(ctx context.Context, o agent.StartOptions) (agent.Conn, e
 	if err != nil {
 		return nil, err
 	}
+	if len(o.MCP) > 0 && o.TempDir != "" {
+		c.mcpFile = filepath.Join(o.TempDir, mcpConfigFile)
+	}
 	ho.Flags = append(ho.Flags, mcp...)
 	ho.Flags = append(ho.Flags, o.Flags...)
 	if len(o.Carry) > 0 && !o.Resume && !o.Fork && o.SessionID != "" {
@@ -167,6 +170,7 @@ type conn struct {
 	events    chan event.Event
 	tools     []agent.ToolServer
 	mcp       []agent.MCPServer // the caller's own, run by Claude Code; under mu once it runs
+	mcpFile   string            // their config, which may hold a token: gone when Claude Code is
 	initID    string
 	initDone  chan struct{}
 	initError string
@@ -234,6 +238,9 @@ func mcpConfig(servers []agent.MCPServer) map[string]stdioServer {
 	return cfg
 }
 
+// mcpConfigFile is the caller's MCP config in the session's scratch folder.
+const mcpConfigFile = "mcp-config.json"
+
 // mcpFlags give Claude Code a caller's MCP servers, beside rush's own. With
 // a scratch folder dir the config is a file there only the user reads, so a
 // server's environment (a token, say) never shows on the command line.
@@ -248,7 +255,7 @@ func mcpFlags(servers []agent.MCPServer, dir string) ([]string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, "mcp-config.json")
+	path := filepath.Join(dir, mcpConfigFile)
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		return nil, err
 	}
@@ -257,23 +264,39 @@ func mcpFlags(servers []agent.MCPServer, dir string) ([]string, error) {
 
 // SetMCP gives the running Claude Code the caller's MCP servers with the
 // mcp_set_servers control request, which takes hold at once, mid-turn too.
-// The request replaces the servers --mcp-config gave, so servers is the
-// whole set. Their tools are trusted from now on, though --allowedTools,
-// fixed at the start, never named them.
+// The request replaces every server rush gave it: the ones --mcp-config
+// named, so servers is the whole set, and rush's own in-process ones
+// (initialize's sdkMcpServers), so each goes as an sdk entry. Their tools
+// are trusted from now on, though --allowedTools, fixed at the start,
+// never named them. A server Claude Code can't start, or one of rush's it
+// still drops, is an error.
 func (c *conn) SetMCP(servers []agent.MCPServer) error {
 	c.mu.Lock()
 	was := c.mcp
 	c.mcp = slices.Clone(servers)
 	c.mu.Unlock()
-	req, _ := jsonx.Marshal(map[string]any{"subtype": "mcp_set_servers", "servers": mcpConfig(servers)})
+	all := map[string]any{}
+	for k, v := range mcpConfig(servers) {
+		all[k] = v
+	}
+	for _, t := range c.tools {
+		all[t.Name] = map[string]string{"type": "sdk", "name": t.Name}
+	}
+	req, _ := jsonx.Marshal(map[string]any{"subtype": "mcp_set_servers", "servers": all})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	body, err := c.Ask(ctx, req)
 	var res struct {
-		Errors map[string]jsontext.Value `json:"errors"`
+		Removed []string                  `json:"removed"`
+		Errors  map[string]jsontext.Value `json:"errors"`
 	}
-	if err == nil && jsonx.Unmarshal(body, &res) == nil && len(res.Errors) > 0 {
-		err = fmt.Errorf("Claude Code did not start the MCP servers: %s", body)
+	if err == nil && jsonx.Unmarshal(body, &res) == nil {
+		own := slices.ContainsFunc(res.Removed, func(n string) bool {
+			return slices.ContainsFunc(c.tools, func(t agent.ToolServer) bool { return t.Name == n })
+		})
+		if len(res.Errors) > 0 || own {
+			err = fmt.Errorf("Claude Code did not take the MCP servers: %s", body)
+		}
 	}
 	if err != nil {
 		c.mu.Lock()
@@ -317,6 +340,9 @@ func (c *conn) ownTraffic(l []byte) bool {
 func (c *conn) relay(ctx context.Context) {
 	defer close(c.events)
 	defer close(c.done)
+	if c.mcpFile != "" {
+		defer os.Remove(c.mcpFile)
+	}
 	var n headless.Neutral
 	for {
 		select {

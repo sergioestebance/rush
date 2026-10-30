@@ -474,6 +474,34 @@ func (s *Server) allowedMCP(servers map[string]MCPSpec) error {
 	return nil
 }
 
+// mcpWait is how long an mcp op waits for the host's answer: past the
+// 30 s its agent has to start the servers live.
+const mcpWait = 45 * time.Second
+
+// awaitReply waits on c for the host's answer to the op with id: nil once
+// it took it, else its reason and the status to answer with it.
+func awaitReply(c *host.Client, id string, wait time.Duration) (int, error) {
+	timeout := time.After(wait)
+	for {
+		select {
+		case l, ok := <-c.Lines:
+			if !ok {
+				return http.StatusBadGateway, errors.New("the session's host went away")
+			}
+			if ev, err := host.Decode(l); err == nil {
+				if r, ok := ev.(host.Reply); ok && r.ID == id {
+					if r.Error != "" {
+						return http.StatusBadGateway, errors.New(r.Error)
+					}
+					return 0, nil
+				}
+			}
+		case <-timeout:
+			return http.StatusGatewayTimeout, errors.New("the session's host did not answer")
+		}
+	}
+}
+
 // mcpName is a name fit for an MCP server: what an agent puts in its tools' names.
 var mcpName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
@@ -660,15 +688,24 @@ func (s *Server) op(w http.ResponseWriter, r *http.Request) {
 	o.Pictures = nil
 	b, _ := jsonx.Marshal(o)
 	if o.Op == "mcp" {
-		// The host takes servers as a list, each with its name.
+		// The host takes servers as a list, each with its name, and
+		// answers the id once it has them.
+		o.ID = hex.EncodeToString(randBytes(8))
 		b, _ = jsonx.Marshal(struct {
 			Op  string            `json:"op"`
+			ID  string            `json:"id"`
 			MCP []agent.MCPServer `json:"mcp"`
-		}{o.Op, mcpList(o.MCP)})
+		}{o.Op, o.ID, mcpList(o.MCP)})
 	}
 	if err := c.Op(b, images...); err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
+	}
+	if o.Op == "mcp" {
+		if code, err := awaitReply(c, o.ID, mcpWait); err != nil {
+			fail(w, code, err.Error())
+			return
+		}
 	}
 	w.WriteHeader(http.StatusAccepted)
 }
