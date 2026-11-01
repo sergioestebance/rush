@@ -176,7 +176,13 @@ func (c *Conn) begin(rpc *client, o agent.StartOptions) error {
 			cfg = map[string]any{}
 			params["config"] = cfg
 		}
-		srv := map[string]any{"command": m.Command, "args": m.Args, "env_vars": envNames(append(os.Environ(), o.Env...))}
+		// Args is always there, [] when it has none: Codex (0.163) fails the
+		// whole thread on a null one.
+		args := m.Args
+		if args == nil {
+			args = []string{}
+		}
+		srv := map[string]any{"command": m.Command, "args": args, "env_vars": envNames(append(os.Environ(), o.Env...))}
 		if len(m.Env) > 0 {
 			srv["env"] = m.Env // the server's own, over the session's
 		}

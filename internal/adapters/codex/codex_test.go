@@ -165,6 +165,27 @@ func TestThreadStartCallerMCP(t *testing.T) {
 	}
 }
 
+// A caller's MCP server with no arguments starts with an empty list: Codex
+// refuses a null one and the whole thread with it.
+func TestThreadStartCallerMCPWithoutArgs(t *testing.T) {
+	cr, fw := io.Pipe()
+	fr, cw := io.Pipe()
+	f := &fake{t: t, in: bufio.NewScanner(fr), out: fw}
+	c := newConn(context.Background())
+	defer c.Close()
+	go func() {
+		_ = c.begin(newClient(cr, cw, c.handle), agent.StartOptions{Dir: "/w",
+			MCP: []agent.MCPServer{{Name: "amtana-threads", Command: "/run/threads-mcp"}}})
+	}()
+	f.respond(f.expect("initialize").ID, map[string]any{"userAgent": "rush/1"})
+	f.expect("initialized")
+	cfg, _ := params(t, f.expect("thread/start"))["config"].(map[string]any)
+	srv, _ := cfg["mcp_servers.amtana-threads"].(map[string]any)
+	if args, ok := srv["args"].([]any); !ok || len(args) != 0 {
+		t.Fatalf("args = %#v, want an empty list", srv["args"])
+	}
+}
+
 func TestThreadStartParams(t *testing.T) {
 	cr, fw := io.Pipe()
 	fr, cw := io.Pipe()
