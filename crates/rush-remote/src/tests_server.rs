@@ -803,12 +803,17 @@ fn devices_sign_in_and_revoke() {
 struct Until {
     out: Arc<Mutex<Vec<u8>>>,
     want: usize,
+    /// A stream that never gets to want frames ends here, so its test
+    /// fails rather than hangs.
+    by: std::time::Instant,
 }
 
 impl Write for Until {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
         let mut o = self.out.lock().unwrap();
-        if String::from_utf8_lossy(&o).matches("data: ").count() >= self.want {
+        if String::from_utf8_lossy(&o).matches("data: ").count() >= self.want
+            || std::time::Instant::now() >= self.by
+        {
             return Err(std::io::Error::other("enough"));
         }
         o.extend_from_slice(b);
@@ -825,6 +830,7 @@ fn stream(r: Response, want: usize) -> String {
         f(&mut Until {
             out: out.clone(),
             want,
+            by: std::time::Instant::now() + Duration::from_secs(20),
         });
     }
     String::from_utf8_lossy(&out.lock().unwrap()).into_owned()
@@ -855,14 +861,70 @@ fn events_of_a_stopped_session() {
         &[("Authorization", &bearer(TOKEN))],
     );
     assert_eq!(r.get("Content-Type"), "text/event-stream");
-    // The writer refuses the keepalive after these two, which ends it.
-    let got = stream(r, 2);
+    // The writer refuses the keepalive after these three, which ends it.
+    let got = stream(r, 3);
     assert!(
         got.starts_with("data: {\"e\":null,\"t\":\"reset\"}\n\n"),
         "{got}"
     );
     assert!(got.contains("\"t\":\"info\""), "{got}");
     assert!(got.contains("\"name\":\"past\""), "{got}");
+    // The fork's server.go:918: a stopped host's catch-up ends with synced,
+    // with no position, so a client holding frames back shows them.
+    assert!(
+        got.ends_with("data: {\"e\":{\"position\":\"\"},\"t\":\"synced\"}\n\n"),
+        "{got}"
+    );
+}
+
+// The fork's server.go:1016 (pump): a running host's replay ends with its
+// info, and synced, with no position, follows it on each attachment.
+#[test]
+fn events_of_a_running_session_say_synced_after_its_info() {
+    let _h = home();
+    let s = server(vec![]);
+    let _f = fake_host("e5e5e5e5", "live", "/work");
+    let r = call(
+        &s,
+        "GET",
+        "/api/sessions/e5e5e5e5/events",
+        "",
+        &[("Authorization", &bearer(TOKEN))],
+    );
+    let got = stream(r, 3);
+    let frames: Vec<&str> = got
+        .split("\n\n")
+        .filter_map(|f| f.strip_prefix("data: "))
+        .collect();
+    assert_eq!(frames.len(), 3, "{got}");
+    assert_eq!(frames[0], r#"{"e":null,"t":"reset"}"#);
+    assert!(frames[1].contains(r#""t":"info""#), "{got}");
+    assert_eq!(frames[2], r#"{"e":{"position":""},"t":"synced"}"#);
+}
+
+/// What a stream sends a stopped host's client as its info file changes:
+/// the whole catch-up once, then its info alone, then nothing until it
+/// changes again; a stream of all of it (?full=1) catches up each time,
+/// as before.
+#[test]
+fn a_stopped_hosts_updates() {
+    use crate::server::{Catchup, stopped_update};
+    let (t1, t2) = (Time::from_unix(100, 0), Time::from_unix(200, 0));
+    let cases = [
+        (None, t1, false, Catchup::Whole),
+        (Some(t1), t1, false, Catchup::Nothing),
+        (Some(t1), t2, false, Catchup::Info),
+        (None, t1, true, Catchup::Whole),
+        (Some(t1), t1, true, Catchup::Nothing),
+        (Some(t1), t2, true, Catchup::Whole),
+    ];
+    for (shown, updated, full, want) in cases {
+        assert_eq!(
+            stopped_update(shown, updated, full),
+            want,
+            "{shown:?} {updated:?} {full}"
+        );
+    }
 }
 
 #[test]

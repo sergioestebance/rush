@@ -6,12 +6,13 @@
 //! Session :67, Machine :73, Handler :81, secure :108, webOn :120, noCache
 //! :132, tokenOK :139, auth :147, sameOrigin :190, login :203, signIn
 //! :222, logout :234, isHTTPS :241, machines :245, list :253, start :262,
-//! allowedCwd :309, validID :336, the fork's remove :792, remoteOps :348, remoteOp :354, Picture
+//! allowedCwd :309, validID :336, remoteOps :348, remoteOp :354, Picture
 //! :380, savePictures :398, op :428, proxy :489, events :524, sse :587,
 //! pump :602, wireLine :631, sendHistory :677, readJSONMost :719, clip
 //! :731, writeJSON :738, fail :744, Run :754), pair.go's handler and
 //! reachedAt (:100, :120), devices.go's handlers (:200, :209) and watch.go's
-//! push handlers (:15, :23).
+//! push handlers (:15, :23). From the fork: remove (server.go:792) and the
+//! synced frames (server.go:918, :1016; resume.go:171).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
@@ -860,31 +861,42 @@ impl Server {
                                     sse(w, Some(&b));
                                 });
                             }
-                            let ok = pump(&ctx, &c, w);
+                            let ok = pump(&ctx, &c, w, !full);
                             c.close();
                             if !ok || ctx.done() {
                                 return;
                             }
                             shown = None;
                         }
-                    } else if shown.is_none_or(|s| s != info.updated_at) {
+                    } else {
                         // Polls the info file each second while the host is down.
-                        send(w, "reset", &Value::Null);
-                        send(
-                            w,
-                            "info",
-                            &serde_json::to_value(&info).unwrap_or(Value::Null),
-                        );
-                        send_history(&reg, &info, Time::default(), full, &mut |b| {
-                            sse(w, Some(&b));
-                        });
-                        shown = Some(if info.updated_at.is_zero() {
+                        let updated = if info.updated_at.is_zero() {
                             Time::from_unix(1, 0)
                         } else {
                             info.updated_at
-                        });
-                    } else if n.is_multiple_of(15) && !sse(w, None) {
-                        return;
+                        };
+                        let info_v = serde_json::to_value(&info).unwrap_or(Value::Null);
+                        match stopped_update(shown, updated, full) {
+                            Catchup::Whole => {
+                                send(w, "reset", &Value::Null);
+                                send(w, "info", &info_v);
+                                send_history(&reg, &info, Time::default(), full, &mut |b| {
+                                    sse(w, Some(&b));
+                                });
+                                if !full && !sse(w, Some(&synced_frame())) {
+                                    return;
+                                }
+                            }
+                            Catchup::Info => {
+                                send(w, "info", &info_v);
+                            }
+                            Catchup::Nothing => {
+                                if n.is_multiple_of(15) && !sse(w, None) {
+                                    return;
+                                }
+                            }
+                        }
+                        shown = Some(updated);
                     }
                     n += 1;
                     if !ctx.sleep(Duration::from_secs(1)) {
@@ -1230,6 +1242,36 @@ fn save_pictures(id: &str, ps: &[Picture]) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
+/// What a stream sends a stopped host's client.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Catchup {
+    /// reset, info, history and synced
+    Whole,
+    /// its info alone
+    Info,
+    Nothing,
+}
+
+/// What a stream sends a stopped host's client whose catch-up was shown
+/// with the info of shown, now that its info file says updated: the whole
+/// catch-up once, then only its info as that changes, as the fork's
+/// resuming stream does (server.go:905-928). A stream of all of it
+/// (?full=1) catches up whole each time, as before.
+pub fn stopped_update(shown: Option<Time>, updated: Time, full: bool) -> Catchup {
+    match shown {
+        Some(s) if s == updated => Catchup::Nothing,
+        Some(_) if !full => Catchup::Info,
+        _ => Catchup::Whole,
+    }
+}
+
+/// A synced frame: the client's catch-up is over. Its position is always
+/// empty, so a client that would resume starts afresh (the fork's
+/// resume.go:171, syncedFrame).
+fn synced_frame() -> Vec<u8> {
+    tagged("synced", &json!({ "position": "" }))
+}
+
 /// {"e":e,"t":t}, as Go writes the map.
 fn tagged(t: &str, e: &Value) -> Vec<u8> {
     serde_json::to_vec(&json!({ "t": t, "e": e })).unwrap_or_default()
@@ -1258,8 +1300,9 @@ pub(crate) fn sse(w: &mut dyn Write, data: Option<&[u8]>) -> bool {
 }
 
 /// Passes a host's lines on as events until the host or the client goes;
-/// false is the client gone.
-fn pump(ctx: &Ctx, c: &rush_host::Client, w: &mut dyn Write) -> bool {
+/// false is the client gone. With sync, synced follows the first info,
+/// the end of the host's replay (the fork's server.go:994, pump).
+fn pump(ctx: &Ctx, c: &rush_host::Client, w: &mut dyn Write, mut sync: bool) -> bool {
     use std::sync::mpsc::RecvTimeoutError;
     let keep = Duration::from_secs(15);
     let mut last = std::time::Instant::now();
@@ -1274,6 +1317,12 @@ fn pump(ctx: &Ctx, c: &rush_host::Client, w: &mut dyn Write) -> bool {
                     && !sse(w, Some(&b))
                 {
                     return false;
+                }
+                if sync && matches!(rush_host::decode(&l), Ok(rush_host::lines::Line::Info(_))) {
+                    sync = false;
+                    if !sse(w, Some(&synced_frame())) {
+                        return false;
+                    }
                 }
             }
             Err(RecvTimeoutError::Disconnected) => return true,
