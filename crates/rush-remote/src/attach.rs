@@ -687,7 +687,8 @@ pub fn host_line(machine: &str, id: &str, pid: i64, data: &[u8]) -> (Option<Vec<
     let s = |v: Value| v.as_str().unwrap_or_default().to_string();
     let line = match w.t.as_str() {
         "reset" => return (None, true),
-        "cut" | "" => return (None, false),
+        // synced ends a stream's catch-up: the stream's, not the host's.
+        "cut" | "synced" | "" => return (None, false),
         "info" => {
             let Ok(i) = serde_json::from_str::<Info>(e) else {
                 return (None, false);
@@ -742,6 +743,16 @@ mod tests {
     fn host_lines() {
         let (l, reset) = host_line("box", "abcd1234", 7, br#"{"t":"reset","e":null}"#);
         assert!(l.is_none() && reset);
+        let (l, reset) = host_line(
+            "box",
+            "abcd1234",
+            7,
+            br#"{"e":{"position":""},"t":"synced"}"#,
+        );
+        assert!(
+            l.is_none() && !reset,
+            "synced is the stream's, not the host's"
+        );
         let (l, _) = host_line("box", "abcd1234", 7, br#"{"e":{"ID":"r1"},"t":"answered"}"#);
         assert_eq!(
             l.unwrap(),
