@@ -9,7 +9,7 @@
 //! :165, sessionStart :182, startSession :269, firstWordsOf :400,
 //! sessionSend :419, sessionControl :571, sessionWatch :629, sessionInfo
 //! :740, sessionList :767), serve.go:58 (serve's starts) and exchange.go:24
-//! (outgoingExchange, here spawn.rs's). answer is the agtop fork's
+//! (outgoingExchange, here spawn.rs's); api is session_api.rs's. answer is the agtop fork's
 //! cmd/rush/answer.go (skippedQuestion :16, sessionAnswer :24, asking
 //! :102, waits :109, pendingOf :141).
 
@@ -69,6 +69,8 @@ pub const USAGE: &str = "rush session: run rush-mode sessions without the view
   rush session search <text> [<id>...] [--since 2h] [--limit N] [--json]
         matches in their conversations (every session's, with no ids):
         session, turn, time and the words around each
+  rush session api --protocol 1   one request on stdin, one answer line: an
+        embedder's probe of this build (protocol, version, revision)
   rush session --on MACHINE <command> …   on another machine's rush serve
         (rush remote add); start takes --cwd --agent --profile --name
         --model --effort --prompt-file, or --resume SESSION to carry on one
@@ -126,6 +128,7 @@ pub fn session_cmd(
             let _ = write!(stdout, "{USAGE}");
             return 0;
         }
+        "api" => return crate::session_api::session_api(rest, stdin, stdout),
         "start" => session_start(env, rest, stdin, stdout),
         "send" => (false, session_send(rest, stdin, stdout)),
         "answer" => (false, session_answer(env, rest, stdin, stdout)),
@@ -1531,6 +1534,29 @@ mod tests {
 
     fn id_of(started: &str) -> String {
         started.split(' ').next().unwrap().to_string()
+    }
+
+    /// `rush session api --protocol 1` answers an embedder's probe with the
+    /// full commit this rush was built from, as baker's pin gate reads it.
+    #[test]
+    fn session_api_probe_says_the_build() {
+        let (code, out, err) = run(
+            &fake_env(),
+            &["api", "--protocol", "1"],
+            r#"{"protocol":1,"requestId":"11111111-1111-4111-8111-111111111111","method":"probe","params":{}}"#,
+        );
+        assert_eq!((code, err.as_str()), (0, ""), "{out}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let build = &v["result"]["build"];
+        assert_eq!(
+            (&v["ok"], &build["protocol"], &build["version"]),
+            (&json!(true), &json!(1), &json!("session-api-v1"))
+        );
+        let rev = build["revision"].as_str().unwrap();
+        assert!(
+            rev.len() == 40 && rev.bytes().all(|c| c.is_ascii_hexdigit()),
+            "revision {rev:?}"
+        );
     }
 
     #[test]

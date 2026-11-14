@@ -20,6 +20,7 @@ mod pushlater;
 mod room;
 mod serve;
 mod session;
+mod session_api;
 mod spawn;
 
 use std::io::Write;
