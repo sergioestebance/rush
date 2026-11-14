@@ -839,6 +839,24 @@ fn login_hint(reg: &Registry, k: &str) -> String {
         .unwrap_or_else(|| "use rush's Settings → Providers".into())
 }
 
+/// The answer a child sends the session it reports to: "<Agent> (agent
+/// <id>) finished", then its words or why it failed. Never its run's
+/// title: a client finds the child by this shape (the fork's
+/// subtool.go:373, reportAnswer).
+pub fn report_text(agent: &str, id: &str, a: &Answer) -> String {
+    let mut text = format!("{agent} (agent {id}) finished");
+    if !a.err.is_empty() {
+        text += &format!(", failing: {}", a.err);
+    } else {
+        let t = a.text.trim();
+        text += &format!(
+            ":\n\n{}",
+            if t.is_empty() { "(it said nothing)" } else { t }
+        );
+    }
+    text
+}
+
 /// A failed run's title, for the session it reports to to know which of
 /// its runs it was: ` "Fix the login form"`, or nothing.
 pub fn titled(name: &str) -> String {
@@ -924,6 +942,40 @@ mod tests {
         let r = fail_report(&reg, "claude", "boom\nmore", "Bash (ls)", 2);
         assert_eq!(r, "boom. Its last step: Bash (ls). rush retried it 2 times");
         assert!(titled("").is_empty() && titled("Fix") == " \"Fix\"");
+    }
+
+    // The fork's subtool.go:373 (reportAnswer): the answer a child sends
+    // the session it reports to reads "<Agent> (agent <id>) finished",
+    // then its words or why it failed. A client finds the child by that
+    // shape, so a named child's title isn't in it.
+    #[test]
+    fn report_texts() {
+        let a = |text: &str, err: &str| Answer {
+            text: text.into(),
+            err: err.into(),
+            ..Answer::default()
+        };
+        let cases = [
+            (
+                a("", "its account is out"),
+                "Codex (agent 4dd63a99) finished, failing: its account is out",
+            ),
+            (
+                a("half done", "boom"),
+                "Codex (agent 4dd63a99) finished, failing: boom",
+            ),
+            (
+                a("  ", ""),
+                "Codex (agent 4dd63a99) finished:\n\n(it said nothing)",
+            ),
+            (
+                a(" 1. P1 Two deadlines.\n", ""),
+                "Codex (agent 4dd63a99) finished:\n\n1. P1 Two deadlines.",
+            ),
+        ];
+        for (ans, want) in cases {
+            assert_eq!(report_text("Codex", "4dd63a99", &ans), want);
+        }
     }
 
     #[test]
