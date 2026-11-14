@@ -773,6 +773,9 @@ fn build(reg: Registry, hooks: Hooks, mut cfg: Config) -> (Host, Receiver<Msg>) 
     let now = Time::now();
     let (tx, rx) = channel();
     let inbox = crate::inbox::takes_inbox(&reg, &cfg.kind);
+    // The list saved last, until its agent lists its own (loadCommands).
+    let saved_commands = crate::commands::read_commands(&cfg.id)
+        .map(|l| Arc::<[u8]>::from(lines::commands_line(&l)));
     let info = Info {
         id: cfg.id.clone(),
         kind: cfg.kind.clone(),
@@ -829,7 +832,7 @@ fn build(reg: Registry, hooks: Hooks, mut cfg: Config) -> (Host, Receiver<Msg>) 
         after_ask: false,
         go_now: 0,
         pics: HashMap::new(),
-        commands: None,
+        commands: saved_commands,
         ctx_out: false,
         task_start: HashMap::new(),
         not_asked: HashSet::new(),
@@ -3719,6 +3722,8 @@ impl Host {
                 }
             }
             Event::Commands(c) => {
+                // Kept, for a client of the session once its agent is gone.
+                let _ = crate::commands::write_commands(&st.cfg.id, &c.list);
                 let b: Arc<[u8]> = lines::commands_line(&c.list).into();
                 st.commands = Some(b.clone());
                 self.push_all(st, &b);

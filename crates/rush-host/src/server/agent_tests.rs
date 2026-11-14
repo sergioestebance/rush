@@ -1076,3 +1076,35 @@ fn a_limit_said_before_isnt_a_sign_in() {
         "a new agent starts with the old one's limit"
     );
 }
+
+// The fork's commands.go: the slash commands an agent lists are saved in
+// its session's folder as it lists them, and a host started for the
+// session later has them for its clients before its agent lists its own.
+#[test]
+fn slash_commands_are_saved_and_loaded() {
+    let _home = Home::new();
+    let h = host(cfg("cm"));
+    let conn: Arc<dyn Conn> = Arc::new(Kept::default());
+    with_conn(&h, conn.clone());
+    let list = vec![event::Command {
+        name: "review".into(),
+        description: "Review a pull request".into(),
+        argument_hint: "<pr>".into(),
+        ..Default::default()
+    }];
+    {
+        let mut st = h.lock();
+        h.on_agent_event(
+            &mut st,
+            &conn,
+            Event::Commands(event::Commands { list: list.clone() }),
+        );
+    }
+    assert_eq!(crate::commands::read_commands("cm"), Some(list.clone()));
+    let again = host(cfg("cm"));
+    let line = again.lock().commands.clone().expect("no commands loaded");
+    let crate::lines::Line::Commands(got) = crate::lines::decode(&line).unwrap() else {
+        panic!("not a commands line")
+    };
+    assert_eq!(got, list);
+}
