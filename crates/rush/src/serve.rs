@@ -4,6 +4,7 @@
 //! After Go's cmd/rush/serve.go (remoteUsage :23, serveCmd :38,
 //! remoteCmd :74, remoteSessionCmd :129, remoteWatch :287) and
 //! session.go's startSession (:269) as serve starts sessions with it.
+//! --programs after the Go fork's serve.go (:40-49).
 
 use std::io::{BufRead, BufReader, Read, Write};
 
@@ -17,9 +18,11 @@ use rush_remote::{Ctx, Peer, Server, Session, StartRequest, load_config, save_co
 use crate::flags::Flags;
 use serde_json::{Value, json};
 
-pub const REMOTE_USAGE: &str = "rush serve [--listen ADDR]
+pub const REMOTE_USAGE: &str = "rush serve [--listen ADDR] [--programs DIR]...
         serve this machine's sessions to the web app and to rush elsewhere;
-        127.0.0.1:7878 unless remote.json or --listen says. See docs/remote.md.
+        127.0.0.1:7878 unless remote.json or --listen says. --programs lets a start
+        run a program from DIR in place of the agent's own, with an environment
+        of its own. See docs/remote.md.
   rush remote token                    this machine's serve token
   rush remote add NAME URL TOKEN       show another machine's serve here
   rush remote attach NAME              keep NAME's sessions in this machine's rush (list, view, send,
@@ -33,7 +36,15 @@ pub const REMOTE_USAGE: &str = "rush serve [--listen ADDR]
 /// Runs rush serve until it's interrupted.
 pub fn serve_cmd(reg: &Registry, args: &[String]) -> Result<(), String> {
     let mut fs = Flags::new("serve", &["listen"], &[]);
+    fs.multi("programs");
     fs.parse(args)?;
+    let mut programs = Vec::new();
+    for d in fs.m("programs") {
+        if !std::path::Path::new(&d).is_absolute() {
+            return Err("--programs takes a full path".into());
+        }
+        programs.push(std::path::PathBuf::from(d));
+    }
     let mut cfg = load_config()?;
     if !fs.s("listen").is_empty() {
         cfg.listen = fs.s("listen");
@@ -41,6 +52,7 @@ pub fn serve_cmd(reg: &Registry, args: &[String]) -> Result<(), String> {
     let tok = token()?;
     let push = rush_remote::push::Push::load(&cfg.origin)?;
     let mut srv = Server::new(cfg.clone(), tok, reg.clone());
+    srv.programs = programs;
     srv.push = Some(Arc::new(push));
     let r = reg.clone();
     srv.start = Some(Arc::new(move |q: &StartRequest| {

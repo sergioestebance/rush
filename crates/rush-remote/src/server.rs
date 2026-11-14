@@ -13,7 +13,7 @@
 //! reachedAt (:100, :120), devices.go's handlers (:200, :209) and watch.go's
 //! push handlers (:15, :23).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -59,6 +59,76 @@ pub struct StartRequest {
     /// in rush, with its own agent and folder.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub resume: String,
+    /// The agent's permission mode, in place of the one rush's settings
+    /// start it with.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    /// The conversation a new session starts as a copy of, under an id of
+    /// its own, leaving the original as it is.
+    #[serde(rename = "forkFrom", skip_serializing_if = "String::is_empty")]
+    pub fork_from: String,
+    /// Labels the host carries in its info, for the client that started it
+    /// to know its own sessions by (an owner, a chat id).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub meta: BTreeMap<String, String>,
+    /// The program run in place of the agent's own, by full path, from one
+    /// of serve's programs folders.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub binary: String,
+    /// Added to the agent's environment, on a serve with programs folders.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl StartRequest {
+    /// env as the host takes it, KEY=value, in name order (EnvList).
+    pub fn env_list(&self) -> Vec<String> {
+        self.env.iter().map(|(k, v)| format!("{k}={v}")).collect()
+    }
+}
+
+/// Whether labels a remote client asked for are fit to store: a few short
+/// ones, none of rush's own (metaOK).
+pub fn meta_ok(m: &BTreeMap<String, String>) -> Result<(), String> {
+    if m.len() > 16 {
+        return Err("at most 16 labels".into());
+    }
+    for (k, v) in m {
+        if k.is_empty() || k.len() > 64 || v.len() > 512 {
+            return Err("a label's name must be 1 to 64 bytes and its value at most 512".into());
+        }
+        if k == "spawnedBy" {
+            return Err(format!("label {k} is rush's own"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether env may be added to an agent's environment: at most 64
+/// variables, none of rush's own (allowedEnv).
+fn allowed_env(env: &BTreeMap<String, String>) -> Result<(), String> {
+    if env.len() > 64 {
+        return Err("at most 64 environment variables".into());
+    }
+    for (k, v) in env {
+        if k.is_empty() || k.contains(['=', '\0']) || v.contains('\0') {
+            return Err(format!("the environment variable {k:?} can't be set"));
+        }
+        if k.starts_with("RUSH_") {
+            return Err(format!("{k} is rush's own"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether s is a conversation's id, a UUID (host.ConversationID).
+fn conversation_id(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == 5
+        && parts
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// A session as serve lists it.
@@ -97,6 +167,9 @@ pub struct Server {
     pub token: String,
     /// Starts a session as rush session start does.
     pub start: Option<StartFn>,
+    /// The folders whose programs a start may run in place of an agent's
+    /// own, with an environment of the client's: none takes neither.
+    pub programs: Vec<PathBuf>,
     /// Sends notifications, when set up.
     pub push: Option<Arc<Push>>,
     /// The agents, for reading a session's history and the sessions rush
@@ -117,6 +190,7 @@ impl Server {
             config,
             token,
             start: None,
+            programs: Vec::new(),
             push: None,
             reg,
             bad_guess: Duration::from_secs(1),
@@ -351,6 +425,16 @@ impl Server {
             Ok(q) => q,
             Err(e) => return fail(400, &e),
         };
+        if let Err(e) = meta_ok(&req.meta) {
+            return fail(400, &e);
+        }
+        if !req.fork_from.is_empty() && (!req.resume.is_empty() || !conversation_id(&req.fork_from))
+        {
+            return fail(
+                400,
+                "a fork names one conversation to copy, and resumes none",
+            );
+        }
         if !req.resume.is_empty() {
             let Some(o) = crate::others::past_other(&self.reg, &req.resume) else {
                 return fail(
@@ -372,6 +456,9 @@ impl Server {
             return fail(400, "the folder must be a full path");
         }
         if let Err(e) = self.allowed_cwd(&req.cwd) {
+            return fail(403, &e);
+        }
+        if let Err(e) = self.allowed_program(&req) {
             return fail(403, &e);
         }
         let Some(start) = &self.start else {
@@ -400,6 +487,47 @@ impl Server {
         }
         let alive = rush_host::alive(info.host_pid);
         write_json(&Session { info, alive })
+    }
+
+    /// Whether a start's program and environment are ones this serve takes:
+    /// none at all without programs folders, the program a file run from
+    /// one of them, and no variable of rush's own (allowedProgram).
+    pub fn allowed_program(&self, req: &StartRequest) -> Result<(), String> {
+        if req.binary.is_empty() && req.env.is_empty() {
+            return Ok(());
+        }
+        if self.programs.is_empty() {
+            return Err(
+                "this serve runs only the agents' own programs, with their own environment".into(),
+            );
+        }
+        allowed_env(&req.env)?;
+        if req.binary.is_empty() {
+            return Ok(());
+        }
+        self.serves_program(&req.binary)
+    }
+
+    /// Whether prog is a program in one of this serve's programs folders,
+    /// with its links followed (servesProgram).
+    fn serves_program(&self, prog: &str) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        if !Path::new(prog).is_absolute() {
+            return Err("the program must be a full path".into());
+        }
+        match std::fs::metadata(prog) {
+            Ok(m) if m.is_file() && m.permissions().mode() & 0o111 != 0 => {}
+            _ => return Err(format!("{prog} isn't a program on this machine")),
+        }
+        let p = real(prog);
+        if self
+            .programs
+            .iter()
+            .any(|d| under(&p, &real(&d.to_string_lossy())))
+        {
+            return Ok(());
+        }
+        Err("that program isn't in one of this serve's program folders".into())
     }
 
     /// Whether a remote client may start a session in dir: never in rush's
