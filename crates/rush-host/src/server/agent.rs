@@ -34,8 +34,8 @@ use crate::longtask::{LONG_TASK_LAST, last_output, long_task_note, overdue_tasks
 use crate::paths::dir;
 use crate::stuck::{STUCK_AFTER, STUCK_LOOK, Waited, agent_command, short, stuck_note};
 use crate::subtool::{
-    Answer, agent_name, answer_path, fail_report, finished, report, report_path, send_result,
-    titled,
+    Answer, agent_name, answer_path, fail_report, finished, report, report_path, report_text,
+    send_result,
 };
 use crate::wire::{Away, Held, Task};
 
@@ -1131,18 +1131,11 @@ impl Host {
             return;
         }
         let _ = report(&st.cfg.id, "");
-        let mut text = format!(
-            "{} (agent {})",
-            agent_name(&self.reg, &rush_core::adapter::migrated(&st.cfg.kind).0),
-            st.cfg.id
+        let text = report_text(
+            &agent_name(&self.reg, &rush_core::adapter::migrated(&st.cfg.kind).0),
+            &st.cfg.id,
+            &a,
         );
-        if !a.err.is_empty() {
-            text += &format!("{} finished, failing: {}", titled(&st.info.name), a.err);
-        } else {
-            let t = a.text.trim();
-            let t = if t.is_empty() { "(it said nothing)" } else { t };
-            text += &format!(" finished:\n\n{t}");
-        }
         let (child, parent) = (st.cfg.id.clone(), to);
         st.w.reporting += 1; // the host doesn't sleep until it's gone (answer_given)
         let h = self.clone();
