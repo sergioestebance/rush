@@ -882,3 +882,245 @@ fn until(what: &str, ok: impl Fn() -> bool) {
     }
     panic!("timed out: {what}");
 }
+
+/// A serve that records what a start asked for, with programs folders.
+fn starting_server(
+    programs: Vec<std::path::PathBuf>,
+) -> (Arc<Server>, Arc<Mutex<Option<StartRequest>>>) {
+    let started: Arc<Mutex<Option<StartRequest>>> = Arc::default();
+    let st = started.clone();
+    let mut s = Server::new(
+        Config {
+            name: "box".into(),
+            ..Config::default()
+        },
+        TOKEN.into(),
+        rush_core::adapter::Registry::new(),
+    );
+    s.programs = programs;
+    s.start = Some(Arc::new(move |r: &StartRequest| {
+        *st.lock().unwrap() = Some(r.clone());
+        Ok(Info::default())
+    }));
+    (Arc::new(s), started)
+}
+
+/// An executable file at p.
+fn program(p: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(p, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// What a client that runs agents in its own sandbox starts a session
+/// with: its labels, a permission mode, a fork, its wrapper and the
+/// wrapper's environment. Each reaches the start as asked.
+#[test]
+fn start_takes_labels_mode_fork_and_a_served_program() {
+    let _h = home();
+    let progs = tempfile::tempdir().unwrap();
+    let wrapper = progs.path().join("wrapper");
+    program(&wrapper);
+    let (s, started) = starting_server(vec![progs.path().to_path_buf()]);
+    let b = bearer(TOKEN);
+    let hdr = [
+        ("Authorization", b.as_str()),
+        ("Content-Type", "application/json"),
+    ];
+    let body = serde_json::json!({
+        "cwd": "/work", "agent": "claude",
+        "meta": {"app.chat": "c1", "app.installation": "i1"},
+        "mode": "bypassPermissions",
+        "forkFrom": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "binary": wrapper.to_string_lossy(),
+        "env": {"TOOL_TOKEN": "t", "HTTPS_PROXY": "http://127.0.0.1:9"},
+    });
+    let r = call(&s, "POST", "/api/sessions", &body.to_string(), &hdr);
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(r.bytes()));
+    let got = started.lock().unwrap().clone().unwrap();
+    assert_eq!(got.meta.get("app.chat").map(String::as_str), Some("c1"));
+    assert_eq!(got.meta.len(), 2);
+    assert_eq!(got.mode, "bypassPermissions");
+    assert_eq!(got.fork_from, "0f8fad5b-d9cb-469f-a165-70867728950e");
+    assert_eq!(got.binary, wrapper.to_string_lossy());
+    assert_eq!(
+        got.env_list(),
+        vec![
+            "HTTPS_PROXY=http://127.0.0.1:9".to_string(),
+            "TOOL_TOKEN=t".into()
+        ]
+    );
+}
+
+/// What serve refuses in a start, before anything starts: labels that
+/// aren't fit to store, a fork that isn't one conversation, and any
+/// program or environment a serve without programs folders, or outside
+/// them, would otherwise run.
+#[test]
+fn start_refuses_unfit_labels_forks_and_programs() {
+    let _h = home();
+    let progs = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let wrapper = progs.path().join("wrapper");
+    program(&wrapper);
+    let outside = other.path().join("claude");
+    program(&outside);
+    let plain = progs.path().join("notes.txt");
+    std::fs::write(&plain, "").unwrap();
+    let link = progs.path().join("link");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let w = wrapper.to_string_lossy().into_owned();
+    let many_labels: serde_json::Map<String, Value> = (0..17)
+        .map(|i| (format!("k{i}"), Value::from("v")))
+        .collect();
+    let many_vars: serde_json::Map<String, Value> = (0..65)
+        .map(|i| (format!("V{i}"), Value::from("v")))
+        .collect();
+    let uuid = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let with_programs = true;
+    let cases: Vec<(&str, bool, Value, u16, &str)> = vec![
+        (
+            "rush's own label",
+            with_programs,
+            serde_json::json!({"meta": {"spawnedBy": "x"}}),
+            400,
+            "label spawnedBy is rush's own",
+        ),
+        (
+            "too many labels",
+            with_programs,
+            serde_json::json!({"meta": many_labels}),
+            400,
+            "at most 16 labels",
+        ),
+        (
+            "long label name",
+            with_programs,
+            serde_json::json!({"meta": {"k".repeat(65): "v"}}),
+            400,
+            "a label's name must be 1 to 64 bytes and its value at most 512",
+        ),
+        (
+            "empty label name",
+            with_programs,
+            serde_json::json!({"meta": {"": "v"}}),
+            400,
+            "a label's name must be 1 to 64 bytes and its value at most 512",
+        ),
+        (
+            "long label value",
+            with_programs,
+            serde_json::json!({"meta": {"k": "v".repeat(513)}}),
+            400,
+            "a label's name must be 1 to 64 bytes and its value at most 512",
+        ),
+        (
+            "fork of no uuid",
+            with_programs,
+            serde_json::json!({"forkFrom": "nope"}),
+            400,
+            "a fork names one conversation to copy, and resumes none",
+        ),
+        (
+            "fork and resume",
+            with_programs,
+            serde_json::json!({"forkFrom": uuid, "resume": uuid}),
+            400,
+            "a fork names one conversation to copy, and resumes none",
+        ),
+        (
+            "program, no folders",
+            !with_programs,
+            serde_json::json!({"binary": w}),
+            403,
+            "this serve runs only the agents' own programs, with their own environment",
+        ),
+        (
+            "env, no folders",
+            !with_programs,
+            serde_json::json!({"env": {"A": "b"}}),
+            403,
+            "this serve runs only the agents' own programs, with their own environment",
+        ),
+        (
+            "program outside",
+            with_programs,
+            serde_json::json!({"binary": outside.to_string_lossy()}),
+            403,
+            "that program isn't in one of this serve's program folders",
+        ),
+        (
+            "link out of folder",
+            with_programs,
+            serde_json::json!({"binary": link.to_string_lossy()}),
+            403,
+            "that program isn't in one of this serve's program folders",
+        ),
+        (
+            "relative program",
+            with_programs,
+            serde_json::json!({"binary": "wrapper"}),
+            403,
+            "the program must be a full path",
+        ),
+        (
+            "not a program",
+            with_programs,
+            serde_json::json!({"binary": plain.to_string_lossy()}),
+            403,
+            &*Box::leak(
+                format!(
+                    "{} isn't a program on this machine",
+                    plain.to_string_lossy()
+                )
+                .into_boxed_str(),
+            ),
+        ),
+        (
+            "rush's own variable",
+            with_programs,
+            serde_json::json!({"binary": w, "env": {"RUSH_HOME": "/x"}}),
+            403,
+            "RUSH_HOME is rush's own",
+        ),
+        (
+            "bad variable name",
+            with_programs,
+            serde_json::json!({"binary": w, "env": {"A=B": "x"}}),
+            403,
+            "the environment variable \"A=B\" can't be set",
+        ),
+        (
+            "too many variables",
+            with_programs,
+            serde_json::json!({"binary": w, "env": many_vars}),
+            403,
+            "at most 64 environment variables",
+        ),
+    ];
+    for (name, programs, extra, want_status, want_err) in cases {
+        let dirs = if programs {
+            vec![progs.path().to_path_buf()]
+        } else {
+            vec![]
+        };
+        let (s, started) = starting_server(dirs);
+        let b = bearer(TOKEN);
+        let hdr = [
+            ("Authorization", b.as_str()),
+            ("Content-Type", "application/json"),
+        ];
+        let mut body = serde_json::json!({"cwd": "/work", "agent": "claude"});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let r = call(&s, "POST", "/api/sessions", &body.to_string(), &hdr);
+        let got: Value = serde_json::from_slice(r.bytes()).unwrap_or_default();
+        assert_eq!(
+            (r.status, got["error"].as_str().unwrap_or("")),
+            (want_status, want_err),
+            "{name}"
+        );
+        assert!(started.lock().unwrap().is_none(), "{name}: it started");
+    }
+}

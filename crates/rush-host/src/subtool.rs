@@ -195,7 +195,7 @@ impl SubAgents {
         }
         let ps = picks(&self.reg, &self.leader());
         let (p, model) = self.choose(&ps, &input.agent, &input.model)?;
-        let mut cfg = self.config(&p, &model, &input.prompt, &input.effort, false);
+        let mut cfg = self.config(&p, &model, &input.prompt, &input.effort, false)?;
         if !input.step.is_empty() {
             cfg.meta.insert("spawnStep".into(), input.step.clone()); // the call that asked: the UI draws it there
         }
@@ -243,7 +243,7 @@ impl SubAgents {
         }
         let ps = session_picks(&self.reg, &self.leader());
         let (p, model) = self.choose(&ps, &input.agent, &input.model)?;
-        let mut cfg = self.config(&p, &model, &input.prompt, &input.effort, true);
+        let mut cfg = self.config(&p, &model, &input.prompt, &input.effort, true)?;
         if !input.cwd.trim().is_empty() {
             cfg.cwd = folder(&input.cwd, &cfg.cwd)?;
         }
@@ -318,9 +318,13 @@ impl SubAgents {
         prompt: &str,
         effort: &str,
         sibling: bool,
-    ) -> Config {
+    ) -> Result<Config, String> {
         let st = rush_state::Store::load().config;
-        let parent = read_config(&self.parent).unwrap_or_default();
+        // Read or refused: a parent that runs a program of its own mustn't
+        // start an agent outside it because its config didn't read.
+        let parent = read_config(&self.parent).map_err(|e| {
+            format!("can't read this session's config, so it starts no agents: {e}")
+        })?;
         let info = read_info(&self.parent).unwrap_or_default();
         let start = st.dispatch.resolved_for(&p.r.k);
         let or = |a: &str, b: &str| {
@@ -363,7 +367,8 @@ impl SubAgents {
                 dir: f.config_dir,
             };
         }
-        cfg
+        keep_program(&self.reg, &parent, &p.r.k, &mut cfg)?;
+        Ok(cfg)
     }
 
     /// Readies cfg's agent k to run it, signed in.
@@ -496,6 +501,32 @@ impl SubAgents {
 }
 
 /// 16 random bytes in hex: an exchange's id.
+/// Has an agent a session starts, its subagent or its sibling, run the
+/// session's own program (a client's wrapper, say) with its environment:
+/// a client that locks a session in a program locks what it starts too.
+/// An agent of another kind can't run it, so is refused (the fork's
+/// internal/host/subtool.go:89, keepProgram).
+fn keep_program(
+    reg: &Registry,
+    parent: &Config,
+    kind: &str,
+    cfg: &mut Config,
+) -> Result<(), String> {
+    if parent.binary.is_empty() {
+        return Ok(());
+    }
+    let own = migrated(&parent.kind).0;
+    if own != kind {
+        return Err(format!(
+            "this session runs a program of its own, so the agents it starts run it too: start a {} agent",
+            agent_name(reg, &own)
+        ));
+    }
+    cfg.binary.clone_from(&parent.binary);
+    cfg.env.clone_from(&parent.env);
+    Ok(())
+}
+
 fn hex_id() -> String {
     crate::paths::rand_bytes::<16>()
         .iter()
@@ -1017,7 +1048,7 @@ mod tests {
         )
         .unwrap();
         let sa = SubAgents::of(Registry::new(), caller).unwrap();
-        let cfg = sa.config(&echo(), "", "find the bug", "", true);
+        let cfg = sa.config(&echo(), "", "find the bug", "", true).unwrap();
         assert!(
             !cfg.meta.contains_key("spawnedBy")
                 && cfg.meta.get("startedFrom").map(String::as_str) == Some(caller)
@@ -1057,18 +1088,95 @@ mod tests {
         assert!(f("nowhere").unwrap_err().contains("there's no folder"));
     }
 
+    // subtool_test.go:108 (TestSpawnKeepsTheParentsProgram), on the fork:
+    // a subagent of a session that runs a program of its own runs it too,
+    // with its environment; one of another kind is refused, and one of a
+    // session on the agent's own program is left as it was.
+    #[test]
+    fn keeps_the_parents_program() {
+        let reg = Registry::new();
+        let parent = Config {
+            kind: "claude".into(),
+            binary: "/run/agent-1".into(),
+            env: vec!["HTTPS_PROXY=http://127.0.0.1:47612".into()],
+            ..Config::default()
+        };
+        let mut cfg = Config::default();
+        keep_program(&reg, &parent, "claude", &mut cfg).unwrap();
+        assert_eq!((&cfg.binary, &cfg.env), (&parent.binary, &parent.env));
+        let err = keep_program(&reg, &parent, "codex", &mut Config::default()).unwrap_err();
+        assert!(err.contains("runs a program of its own"), "{err}");
+        let mut plain = Config {
+            binary: "/usr/local/bin/codex2".into(),
+            ..Config::default()
+        };
+        let bare = Config {
+            kind: "claude".into(),
+            ..Config::default()
+        };
+        keep_program(&reg, &bare, "codex", &mut plain).unwrap();
+        assert!(plain.binary == "/usr/local/bin/codex2" && plain.env.is_empty());
+    }
+
+    /// Both ways a session starts agents, spawn_agent's child and
+    /// start_agent's sibling, keep its program; another kind is refused,
+    /// and a parent whose config can't be read starts nothing rather than
+    /// an agent outside its program.
+    #[test]
+    fn started_agents_keep_the_parents_program() {
+        let home = Home::new();
+        let cwd = home.path().to_string_lossy().into_owned();
+        let parent = |id: &str, kind: &str| {
+            std::fs::create_dir_all(dir(id)).unwrap();
+            std::fs::write(
+                dir(id).join("config.json"),
+                format!(
+                    r#"{{"id":"{id}","kind":"{kind}","cwd":"{cwd}","binary":"/run/agent-1","env":["A=1"]}}"#
+                ),
+            )
+            .unwrap();
+            SubAgents::of(Registry::new(), id).unwrap()
+        };
+        let sa = parent("caller01", "echo");
+        for sibling in [false, true] {
+            let cfg = sa.config(&echo(), "", "find the bug", "", sibling).unwrap();
+            assert!(
+                cfg.binary == "/run/agent-1" && cfg.env == ["A=1"],
+                "sibling {sibling}: {cfg:?}"
+            );
+        }
+        let other = parent("caller02", "claude");
+        for sibling in [false, true] {
+            let err = other
+                .config(&echo(), "", "find the bug", "", sibling)
+                .unwrap_err();
+            assert!(err.contains("runs a program of its own"), "{err}");
+        }
+        std::fs::write(dir("caller01").join("config.json"), "{not json").unwrap();
+        let err = sa
+            .config(&echo(), "", "find the bug", "", false)
+            .unwrap_err();
+        assert!(err.contains("can't read"), "{err}");
+    }
+
     // subtool_test.go:191 (TestSpawnedIsAChild): spawn_agent's agent is
     // still the caller's child, working for it.
     #[test]
     fn spawned_is_a_child() {
         let _home = Home::new();
+        std::fs::create_dir_all(dir("caller01")).unwrap();
+        std::fs::write(
+            dir("caller01").join("config.json"),
+            r#"{"id":"caller01","kind":"echo"}"#,
+        )
+        .unwrap();
         let sa = SubAgents {
             reg: Registry::new(),
             parent: "caller01".into(),
             kind: "echo".into(),
             headless: false,
         };
-        let cfg = sa.config(&echo(), "", "find the bug", "", false);
+        let cfg = sa.config(&echo(), "", "find the bug", "", false).unwrap();
         assert!(
             cfg.meta.get("spawnedBy").map(String::as_str) == Some("caller01")
                 && !cfg.meta.contains_key("startedFrom")

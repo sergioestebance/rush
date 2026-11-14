@@ -27,6 +27,11 @@ impl Flags {
         }
     }
 
+    /// Adds a flag that may be given more than once.
+    pub fn multi(&mut self, name: &'static str) {
+        self.multis.push((name, Vec::new()));
+    }
+
     /// A session command's flags (newFlags): -help prints nothing.
     pub fn session(
         name: &str,

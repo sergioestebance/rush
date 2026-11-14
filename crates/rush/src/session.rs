@@ -312,6 +312,7 @@ fn start_flags(
             images,
             env: env_vars,
             meta,
+            ..StartOpts::default()
         },
     )?;
     let v = env.view(info);
@@ -341,6 +342,9 @@ pub struct StartOpts {
     pub images: Vec<String>,
     pub env: Vec<String>,
     pub meta: Option<BTreeMap<String, String>>,
+    /// The conversation a new session continues a copy of, under an id of
+    /// its own.
+    pub fork_from: String,
 }
 
 /// Starts a session as a remote client asks (serve.go:58).
@@ -357,6 +361,11 @@ pub fn start_requested(reg: &Registry, r: &StartRequest) -> Result<Info, String>
             name: r.name.clone(),
             session_id: r.resume.clone(),
             resume: !r.resume.is_empty(),
+            mode: r.mode.clone(),
+            fork_from: r.fork_from.clone(),
+            meta: (!r.meta.is_empty()).then(|| r.meta.clone()),
+            binary: r.binary.clone(),
+            env: r.env_list(),
             ..StartOpts::default()
         },
     )
@@ -411,6 +420,14 @@ pub fn start_session(env: &Env, o: StartOpts) -> Result<Info, String> {
             };
         }
         cfg.resume = o.resume;
+    }
+    if !o.fork_from.is_empty() {
+        // As the fork sheet forks: the source resumed as a copy under an
+        // id of its own (spawn names it), which every agent that forks takes.
+        cfg.session_id = o.fork_from.clone();
+        cfg.resume = true;
+        cfg.fork = true;
+        cfg.from = o.fork_from.clone();
     }
     if !o.cwd.is_empty() {
         cfg.cwd = std::path::absolute(&o.cwd)
@@ -1624,6 +1641,50 @@ mod tests {
             out,
             "{\"error\":\"flag provided but not defined: -nope\"}\n"
         );
+    }
+
+    // A remote start's fork, mode, program and environment reach the host's
+    // config: the fork resumes a copy of the source conversation under an
+    // id of its own (startSession's ForkFrom).
+    #[test]
+    fn requested_start_forks_and_keeps_its_program() {
+        let home = Home::new();
+        let env = fake_env();
+        let src = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let info = start_session(
+            &env,
+            StartOpts {
+                cwd: home.path(),
+                kind: "fake".into(),
+                fork_from: src.into(),
+                mode: "bypassPermissions".into(),
+                binary: "/opt/wrapper".into(),
+                env: vec!["TOOL_TOKEN=t".into()],
+                meta: Some(BTreeMap::from([("app.chat".into(), "c1".into())])),
+                ..StartOpts::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(
+            info.id,
+            rush_host::short_id(src),
+            "the copy is a session of its own"
+        );
+        let cfg = rush_host::read_config(&info.id).unwrap();
+        assert_eq!(
+            (
+                cfg.session_id.as_str(),
+                cfg.resume,
+                cfg.fork,
+                cfg.from.as_str()
+            ),
+            (src, true, true, src)
+        );
+        assert_eq!(cfg.permission_mode, "bypassPermissions");
+        assert_eq!(cfg.binary, "/opt/wrapper");
+        assert_eq!(cfg.env, vec!["TOOL_TOKEN=t".to_string()]);
+        assert_eq!(cfg.meta.get("app.chat").map(String::as_str), Some("c1"));
+        let _ = run(&env, &["stop", &info.id], "");
     }
 
     // start, info, list, interrupt, watch and stop against sessions the
