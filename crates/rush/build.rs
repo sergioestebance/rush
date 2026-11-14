@@ -2,6 +2,9 @@
 //! released one does (`rush 0.1.0 (3f2a9c1b7d0e)`): RUSH_COMMIT, unless
 //! the build sets it (the release workflow does). Not RUSH_VERSION: that
 //! names a release, and a rush without one doesn't update itself.
+//!
+//! RUSH_REVISION is the whole commit, which `rush session api`'s probe
+//! reports for an embedder to pin; a build without git says "unknown".
 
 use std::process::Command;
 
@@ -16,7 +19,10 @@ fn git(args: &[&str]) -> Option<String> {
 
 fn main() {
     println!("cargo:rerun-if-env-changed=RUSH_COMMIT");
-    if std::env::var_os("RUSH_COMMIT").is_some() {
+    println!("cargo:rerun-if-env-changed=RUSH_REVISION");
+    let commit_set = std::env::var_os("RUSH_COMMIT").is_some();
+    let revision_set = std::env::var_os("RUSH_REVISION").is_some();
+    if commit_set && revision_set {
         return;
     }
     // A new commit moves HEAD's log; checking out another moves HEAD.
@@ -25,7 +31,10 @@ fn main() {
             println!("cargo:rerun-if-changed={path}");
         }
     }
-    if let Some(commit) = git(&["rev-parse", "--short=12", "HEAD"]) {
+    if !commit_set && let Some(commit) = git(&["rev-parse", "--short=12", "HEAD"]) {
         println!("cargo:rustc-env=RUSH_COMMIT={commit}");
+    }
+    if !revision_set && let Some(revision) = git(&["rev-parse", "HEAD"]) {
+        println!("cargo:rustc-env=RUSH_REVISION={revision}");
     }
 }
