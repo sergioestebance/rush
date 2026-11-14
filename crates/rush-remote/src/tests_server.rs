@@ -388,6 +388,69 @@ impl FakeHost {
     }
 }
 
+// The fork's server_test.go:278 (TestDeleteTakesASessionForGood): a delete
+// stops a running session first, then takes its folder and scratch, so the
+// list no longer has it; one already gone is a 404.
+#[test]
+fn delete_takes_a_session_for_good() {
+    let _h = home();
+    let f = fake_host("feedbeef", "job", "/work");
+    let mut s = Server::new(
+        Config {
+            name: "box".into(),
+            ..Config::default()
+        },
+        TOKEN.into(),
+        rush_core::adapter::Registry::new(),
+    );
+    s.delete_wait = Duration::from_millis(50);
+    let s = Arc::new(s);
+    let b = bearer(TOKEN);
+    let hdr = [("Authorization", b.as_str())];
+    let del = || call(&s, "DELETE", "/api/sessions/feedbeef", "", &hdr);
+
+    let r = del();
+    assert_eq!(
+        r.status,
+        409,
+        "a host that won't stop: {}",
+        String::from_utf8_lossy(r.bytes())
+    );
+    assert_eq!(f.op()["op"], "stop", "the host wasn't asked to stop");
+
+    let scratch = rush_host::dir("feedbeef").join("tmp");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let mut info = f.info.clone();
+    info.host_pid = 0; // stopped
+    std::fs::write(
+        rush_host::dir("feedbeef").join("info.json"),
+        serde_json::to_vec(&info).unwrap(),
+    )
+    .unwrap();
+    let r = del();
+    assert_eq!(
+        r.status,
+        204,
+        "delete: {}",
+        String::from_utf8_lossy(r.bytes())
+    );
+    assert!(
+        !rush_host::dir("feedbeef").exists(),
+        "the folder outlived the delete"
+    );
+    let list = call(&s, "GET", "/api/sessions", "", &hdr);
+    assert!(
+        !String::from_utf8_lossy(list.bytes()).contains("feedbeef"),
+        "a deleted session is listed"
+    );
+    assert_eq!(del().status, 404, "repeated delete");
+    for bad in ["/api/sessions/..", "/api/sessions/a.b"] {
+        assert_eq!(call(&s, "DELETE", bad, "", &hdr).status, 404, "{bad}");
+    }
+    let r = call(&s, "PUT", "/api/sessions/feedbeef", "", &hdr);
+    assert_eq!(r.status, 405);
+}
+
 /// Every control the web app has, sent as the browser would: what reaches
 /// the host is what the app asked for, and nothing carries a path.
 #[test]

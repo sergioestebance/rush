@@ -314,6 +314,28 @@ pub fn read_info(id: &str) -> std::io::Result<Info> {
     Ok(info)
 }
 
+/// Takes a session that isn't running for good: its folder, with its
+/// transcript and info, and its scratch. A session already gone is no
+/// error; a running one is refused. The scratch goes only when its link
+/// leads to a session scratch folder rush lays out, never elsewhere (the
+/// fork's client.go:163, Remove).
+pub fn remove(id: &str) -> std::io::Result<()> {
+    if let Ok(info) = read_info(id)
+        && crate::alive(info.host_pid)
+    {
+        return Err(std::io::Error::other("the session is still running"));
+    }
+    let tmp = crate::tmp::temp_dir(id);
+    // Not just any folder named tmp: one under rush's scratch root.
+    if crate::tmp::is_temp_dir(&tmp) && tmp.starts_with(crate::tmp::temp_root()) {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    match std::fs::remove_dir_all(dir(id)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
 /// info.json as written, brought up to date.
 pub fn read_info_file(id: &str) -> std::io::Result<Info> {
     let b = std::fs::read(dir(id).join("info.json"))?;
@@ -1680,6 +1702,43 @@ mod tests {
         let mut ids: Vec<String> = s.list().into_iter().map(|i| i.id).collect();
         ids.sort();
         assert_eq!(ids, ["a-working", "c-alive"]);
+    }
+
+    // The fork's client.go:163 (Remove): a session that isn't running goes
+    // for good, its folder and its scratch; a running one is refused; one
+    // already gone is no error. A tmp link that leads out of rush's scratch
+    // is let be: only the session's own folder goes.
+    #[test]
+    fn remove_takes_a_stopped_session_for_good() {
+        let _h = Home::new();
+        write("running1", "idle", std::process::id() as i64);
+        let err = remove("running1").unwrap_err();
+        assert!(err.to_string().contains("still running"), "{err}");
+        assert!(dir("running1").is_dir());
+
+        write("stopped1", "stopped", 0);
+        let scratch = crate::tmp::temp_root().join("work-1").join("stopped1");
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(scratch.join("notes"), "x").unwrap();
+        std::os::unix::fs::symlink(&scratch, dir("stopped1").join("tmp")).unwrap();
+        remove("stopped1").unwrap();
+        assert!(!dir("stopped1").exists() && !scratch.exists());
+        remove("stopped1").unwrap();
+
+        write("stopped2", "stopped", 0);
+        let outside = tempfile::tempdir().unwrap();
+        for (id, to) in [
+            ("stopped2", outside.path().join("work")),
+            ("stopped3", outside.path().join("tmp")), // named tmp, still not rush's
+        ] {
+            write(id, "stopped", 0);
+            std::fs::create_dir_all(&to).unwrap();
+            std::fs::write(to.join("keep"), "x").unwrap();
+            std::os::unix::fs::symlink(&to, dir(id).join("tmp")).unwrap();
+            remove(id).unwrap();
+            assert!(!dir(id).exists());
+            assert!(to.join("keep").exists(), "{id}: a link out was followed");
+        }
     }
 }
 

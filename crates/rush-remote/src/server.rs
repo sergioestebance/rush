@@ -6,7 +6,7 @@
 //! Session :67, Machine :73, Handler :81, secure :108, webOn :120, noCache
 //! :132, tokenOK :139, auth :147, sameOrigin :190, login :203, signIn
 //! :222, logout :234, isHTTPS :241, machines :245, list :253, start :262,
-//! allowedCwd :309, validID :336, remoteOps :348, remoteOp :354, Picture
+//! allowedCwd :309, validID :336, the fork's remove :792, remoteOps :348, remoteOp :354, Picture
 //! :380, savePictures :398, op :428, proxy :489, events :524, sse :587,
 //! pump :602, wireLine :631, sendHistory :677, readJSONMost :719, clip
 //! :731, writeJSON :738, fail :744, Run :754), pair.go's handler and
@@ -104,6 +104,8 @@ pub struct Server {
     pub reg: Registry,
     /// The pause after a bad sign-in (tests: none).
     pub bad_guess: Duration,
+    /// How long a delete waits for a running session to stop.
+    pub delete_wait: Duration,
     pub(crate) pairs: PairCodes,
     pub(crate) devs: Devices,
     pub(crate) live: LiveConns,
@@ -120,6 +122,7 @@ impl Server {
             push: None,
             reg,
             bad_guess: Duration::from_secs(1),
+            delete_wait: Duration::from_secs(10),
             pairs: PairCodes::default(),
             devs: Devices::default(),
             live: LiveConns::default(),
@@ -238,6 +241,9 @@ impl Server {
             },
             ["api", "sessions", "stream"] => {
                 allow(get, "GET, HEAD").unwrap_or_else(|| self.sessions_stream(r, cookie))
+            }
+            ["api", "sessions", id] if !id.is_empty() => {
+                allow(m == "DELETE", "DELETE").unwrap_or_else(|| self.remove(r, id))
             }
             ["api", "sessions", id, "events"] if !id.is_empty() => {
                 allow(get, "GET, HEAD").unwrap_or_else(|| self.events(r, id))
@@ -421,6 +427,33 @@ impl Server {
             return Ok(());
         }
         Err("that folder isn't one of this machine's workspaces".into())
+    }
+
+    /// Takes a session for good, as its owner deleting a chat does: a
+    /// running one is stopped first, then its folder and scratch go, so
+    /// the list no longer has it. A session already gone answers 404; one
+    /// that won't stop in time, 409 (the fork's server.go:792, remove).
+    fn remove(&self, r: &Request, id: &str) -> Response {
+        if !valid_id(id) {
+            return fail(404, "no such session");
+        }
+        if let Ok(info) = rush_host::read_info(id)
+            && rush_host::alive(info.host_pid)
+        {
+            if let Ok(c) = rush_host::Client::dial(id) {
+                let _ = c.stop();
+            }
+            let until = std::time::Instant::now() + self.delete_wait;
+            while rush_host::alive(info.host_pid) {
+                if std::time::Instant::now() >= until || !r.ctx.sleep(Duration::from_millis(20)) {
+                    return fail(409, "the session didn't stop");
+                }
+            }
+        }
+        match rush_host::remove(id) {
+            Ok(()) => Response::new(204, Vec::new()),
+            Err(e) => fail(500, &e.to_string()),
+        }
     }
 
     fn op(&self, r: &Request, id: &str) -> Response {
