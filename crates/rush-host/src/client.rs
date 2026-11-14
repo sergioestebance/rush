@@ -1407,14 +1407,8 @@ pub(crate) fn ensure_with(id: &str, prompt: &str, cause: &str) -> Result<()> {
         )
         .into());
     }
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(dir(id).join("wake.lock"))?;
     let deadline = Instant::now() + Duration::from_secs(15);
-    flock_until(&lock, deadline)?;
+    let _lock = wake_lock(id, deadline)?;
     let w = rush_sys::fswait::Watcher::new();
     w.watch(&[dir(id)]);
     while let Ok(info) = read_info(id) {
@@ -1444,6 +1438,20 @@ pub(crate) fn ensure_with(id: &str, prompt: &str, cause: &str) -> Result<()> {
     cfg.owner = 0;
     cfg.cause = cause.to_string();
     spawn(cfg).map(|_| ())
+}
+
+/// Session id's startup lock, which a wake (ensure) and a restart take, so
+/// only one of them starts its host: held until the file returned closes,
+/// waiting until deadline for another to let it go.
+fn wake_lock(id: &str, deadline: Instant) -> Result<std::fs::File> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(dir(id).join("wake.lock"))?;
+    flock_until(&lock, deadline)?;
+    Ok(lock)
 }
 
 /// Takes f's exclusive lock, waiting until deadline; the lock is let go
@@ -1574,6 +1582,10 @@ pub fn restart_on(
             format!("the installed rush can't run {id}, so its host carries on: {e}").into(),
         );
     }
+    // Held from the stop until the new host accepts connections: a wake
+    // meanwhile waits, then finds it running, rather than starting a
+    // second host (sleep.go:202's lock, which ensure takes).
+    let _lock = wake_lock(id, Instant::now() + Duration::from_secs(15))?;
     let info = read_info(id).unwrap_or_default();
     // Its stop and its start again come of this.
     let ev = rush_events::id();

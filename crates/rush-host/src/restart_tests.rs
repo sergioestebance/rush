@@ -218,3 +218,49 @@ fn an_installed_rush_that_cant_run_it_leaves_it_running() {
     assert_eq!(starts(&home).len(), 1, "its agent untouched");
     stop("ra3");
 }
+
+/// Whether another wake holds session id's startup lock: a lock of our
+/// own on a fresh open of wake.lock is refused while one is held.
+fn wake_locked(id: &str) -> bool {
+    use std::os::fd::AsRawFd;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(crate::paths::dir(id).join("wake.lock"))
+        .unwrap();
+    // SAFETY: f's fd, open for this call.
+    let got = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    !got // closing f lets ours go
+}
+
+// A restart holds the startup lock a wake takes (ensure) from stopping the
+// old host until the new one accepts connections, so a message that wakes
+// the session meanwhile can't start a second host for it. Let go after.
+#[test]
+fn a_restart_holds_the_wake_lock_while_it_starts_the_new_host() {
+    let home = Home::new();
+    start(&home, "ra3");
+    let exe = ok_rush(&home);
+    assert!(!wake_locked("ra3"));
+    let sp = Spawner::new();
+    let held = Mutex::new(Vec::new());
+    restart_agent_on("ra3", "", &exe, &|c: Config, e: &Path| {
+        held.lock().unwrap().push(wake_locked("ra3"));
+        sp.spawn(c, e)
+    })
+    .unwrap();
+    assert_eq!(
+        *held.lock().unwrap(),
+        [true],
+        "spawned without the wake lock"
+    );
+    // A process another test forks meanwhile shares the lock until it
+    // execs, so let go is looked for, not assumed at once.
+    assert!(
+        until(&home, "ra3", || !wake_locked("ra3")),
+        "the lock outlived the restart"
+    );
+    stop("ra3");
+}
