@@ -81,7 +81,7 @@ pub(crate) mod testing;
 use std::time::Duration;
 
 pub use client::{
-    Client, ClientError, Lister, deliver, ensure, list, read_config, read_info, restart,
+    Client, ClientError, Lister, deliver, ensure, list, read_config, read_info, remove, restart,
     restart_agent, running, spawn,
 };
 pub use lines::{Decoder, Line, Sent, decode};
