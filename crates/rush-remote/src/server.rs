@@ -16,7 +16,8 @@
 //! frames (server.go:910, :1062), the history route (server.go:171), a
 //! stream's tail of turns in place of its last events (server.go:915,
 //! :939; see resume.rs) and the caller's MCP servers (StartRequest.MCP
-//! :97-120, allowedMCP :462, mcpName :574).
+//! :97-120, allowedMCP :462, mcpName :574; the mcp op :725-786, mcpWait
+//! :488, mcpByRestart :502, restartWhenQuiet :530, awaitReply :548).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
@@ -166,6 +167,34 @@ pub fn meta_ok(m: &BTreeMap<String, String>) -> Result<(), String> {
 const NO_PROGRAMS: &str =
     "this serve runs only the agents' own programs, with their own environment";
 
+/// Waits on c for the host's answer to the op with id, up to wait: Ok once
+/// it took it, else the status to answer with and why (awaitReply).
+fn await_reply(c: &rush_host::Client, id: &str, wait: Duration) -> Result<(), (u16, String)> {
+    let end = std::time::Instant::now() + wait;
+    loop {
+        let left = end.saturating_duration_since(std::time::Instant::now());
+        match c.lines.recv_timeout(left) {
+            Ok(l) => {
+                if let Ok(rush_host::Line::Reply { id: rid, error, .. }) = rush_host::decode(&l)
+                    && rid == id
+                {
+                    return if error.is_empty() {
+                        Ok(())
+                    } else {
+                        Err((502, error))
+                    };
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err((502, "the session's host went away".into()));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err((504, "the session's host did not answer".into()));
+            }
+        }
+    }
+}
+
 /// Whether env may be added to an agent's or a server's environment: at
 /// most 64 variables, none of rush's own (allowedEnv).
 fn allowed_env(env: &BTreeMap<String, String>) -> Result<(), String> {
@@ -221,6 +250,13 @@ pub struct ErrorBody {
 /// Starts a session as rush session start does.
 pub type StartFn = Arc<dyn Fn(&StartRequest) -> Result<Info, String> + Send + Sync>;
 
+/// Restarts session id's host with MCP servers added to its own.
+pub type RestartMcpFn = Arc<dyn Fn(&str, &[McpServer]) -> Result<(), String> + Send + Sync>;
+
+/// How long serve waits for a host from before mcp ops to end its turn
+/// (quietWaitMost).
+const QUIET_WAIT_MOST: Duration = Duration::from_secs(24 * 3600);
+
 const COOKIE: &str = "rush_token";
 
 /// One machine's rush serve.
@@ -241,6 +277,19 @@ pub struct Server {
     pub bad_guess: Duration,
     /// How long a delete waits for a running session to stop.
     pub delete_wait: Duration,
+    /// How long an mcp op waits for the host's answer: past the 30 s its
+    /// agent has to start the servers live (mcpWait).
+    pub mcp_wait: Duration,
+    /// How often serve looks whether a host from before mcp ops that an
+    /// mcp op found mid-turn is between turns yet (quietPoll).
+    pub quiet_poll: Duration,
+    /// Restarts a session's host on this rush with MCP servers added, for
+    /// an mcp op to a host from before mcp ops; None is
+    /// rush_host::restart_with_mcp (RestartMCP).
+    pub restart_mcp: Option<RestartMcpFn>,
+    /// The sessions whose host from before mcp ops waits for its turn to
+    /// end, to be restarted with MCP servers (quietRestarts).
+    quiet_restarts: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub(crate) pairs: PairCodes,
     pub(crate) devs: Devices,
     pub(crate) live: LiveConns,
@@ -259,6 +308,10 @@ impl Server {
             reg,
             bad_guess: Duration::from_secs(1),
             delete_wait: Duration::from_secs(10),
+            mcp_wait: Duration::from_secs(45),
+            quiet_poll: Duration::from_secs(1),
+            restart_mcp: None,
+            quiet_restarts: Arc::default(),
             pairs: PairCodes::default(),
             devs: Devices::default(),
             live: LiveConns::default(),
@@ -695,11 +748,20 @@ impl Server {
         if o.op != "send" && !o.pictures.is_empty() {
             return fail(400, "only a message takes images");
         }
+        let mcp = o.op == "mcp";
+        if mcp == o.mcp.is_empty() {
+            return fail(400, "an mcp op, and only one, names MCP servers");
+        }
+        if let Err(e) = self.allowed_mcp(&o.mcp) {
+            return fail(403, &e);
+        }
         let info = rush_host::read_info(id);
         let mut woke = false;
         let mut err: Option<String> = None;
         let running = info.as_ref().is_ok_and(|i| rush_host::alive(i.host_pid));
-        if o.op == "send" && !running {
+        // A send wakes a stopped session, and so does an mcp op: the
+        // servers are kept with it, for its agent's next start.
+        if (o.op == "send" || mcp) && !running {
             woke = true;
             err = rush_host::ensure(id, "").err().map(|e| e.to_string());
         } else if let Err(e) = &info {
@@ -721,6 +783,13 @@ impl Server {
         if let Some(e) = err {
             return fail(409, &e);
         }
+        if let Ok(info) = &info
+            && mcp
+            && !woke
+            && !info.takes_mcp()
+        {
+            return self.mcp_by_restart(id, info, mcp_list(&o.mcp));
+        }
         let c = match rush_host::Client::dial(id) {
             Ok(c) => c,
             Err(e) => return fail(409, &e.to_string()),
@@ -731,11 +800,101 @@ impl Server {
         };
         let mut hop = o.to_op();
         hop.images = images;
-        if let Err(e) = c.send_op(hop) {
+        if mcp {
+            // The host takes servers as a list, each with its name, and
+            // answers the id once it has them.
+            hop = rush_host::Op::named("mcp");
+            hop.id = hex(&rand_bytes(8));
+            hop.mcp = mcp_list(&o.mcp);
+        }
+        if let Err(e) = c.send_op(hop.clone()) {
             return fail(502, &e.to_string());
+        }
+        if mcp && let Err((code, e)) = await_reply(&c, &hop.id, self.mcp_wait) {
+            c.close();
+            return fail(code, &e);
         }
         c.close();
         Response::new(202, Vec::new())
+    }
+
+    /// Answers an mcp op to session id's host that can't take it live
+    /// (Info::takes_mcp): it restarts the host on this rush with servers,
+    /// at once between turns (202 once the new host runs), else once the
+    /// turn has ended (409 now, so the caller tries again). A session that
+    /// runs them all already answers 202 and restarts nothing
+    /// (mcpByRestart).
+    fn mcp_by_restart(&self, id: &str, info: &Info, servers: Vec<McpServer>) -> Response {
+        if rush_host::read_config(id).is_ok_and(|c| !c.adds_mcp(&servers)) {
+            return Response::new(202, Vec::new());
+        }
+        if info.quiet() {
+            return match self.restarter()(id, &servers) {
+                Ok(()) => Response::new(202, Vec::new()),
+                Err(e) => fail(502, &e),
+            };
+        }
+        self.restart_when_quiet(id, servers);
+        fail(
+            409,
+            "the session's host is from before mcp ops: it is restarted with the servers when its turn has ended",
+        )
+    }
+
+    /// What restarts a host with MCP servers: restart_mcp, else the
+    /// installed rush's.
+    fn restarter(&self) -> RestartMcpFn {
+        self.restart_mcp.clone().unwrap_or_else(|| {
+            Arc::new(|id: &str, servers: &[McpServer]| {
+                rush_host::restart_with_mcp(id, servers).map_err(|e| e.to_string())
+            })
+        })
+    }
+
+    /// Restarts session id's host from before mcp ops with servers once it
+    /// is between turns, one wait a session: a later op's servers while one
+    /// waits are left to the op after the restart, which the new host takes
+    /// itself. A host that ends, or is current by then, is left
+    /// (restartWhenQuiet).
+    fn restart_when_quiet(&self, id: &str, servers: Vec<McpServer>) {
+        if !self
+            .quiet_restarts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string())
+        {
+            return;
+        }
+        let (restart, waiting, poll) = (
+            self.restarter(),
+            self.quiet_restarts.clone(),
+            self.quiet_poll,
+        );
+        let id = id.to_string();
+        std::thread::spawn(move || {
+            let w = rush_sys::fswait::Watcher::new();
+            w.watch(&[rush_host::dir(&id)]);
+            let end = std::time::Instant::now() + QUIET_WAIT_MOST;
+            while std::time::Instant::now() < end {
+                let Ok(info) = rush_host::read_info(&id) else {
+                    break;
+                };
+                if !rush_host::alive(info.host_pid) || info.takes_mcp() {
+                    break;
+                }
+                if info.quiet() {
+                    let _ = restart(&id, &servers);
+                    break;
+                }
+                // Its info changes as its turn ends; a look every poll at
+                // most besides.
+                w.wait(None, Some(poll));
+            }
+            waiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+        });
     }
 
     /// Passes a request for /m/<peer>/api/… on to that peer's serve, with
@@ -1171,10 +1330,11 @@ pub(crate) fn valid_id(id: &str) -> bool {
 }
 
 /// The ops a remote client may send a host: answering, steering and
-/// stopping its agent, its queue, going away and coming back, and what it
-/// waits on at a limit. Rewinds, compacting and relogins work on files or
-/// accounts the client has only on its own machine.
-pub const REMOTE_OPS: [&str; 23] = [
+/// stopping its agent, its queue, going away and coming back, what it
+/// waits on at a limit, and MCP servers to add (mcp, on the terms of a
+/// start's). Rewinds, compacting and relogins work on files or accounts
+/// the client has only on its own machine.
+pub const REMOTE_OPS: [&str; 24] = [
     "send",
     "allow",
     "deny",
@@ -1186,6 +1346,7 @@ pub const REMOTE_OPS: [&str; 23] = [
     "effort",
     "mode",
     "without",
+    "mcp",
     "tell",
     "context",
     "limit",
@@ -1241,6 +1402,9 @@ pub struct RemoteOp {
     pub without: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub away: Option<Away>,
+    /// An mcp op's servers by name, as a start's mcp.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: BTreeMap<String, McpSpec>,
     /// A send's images as bytes: serve writes them to the session's
     /// scratch folder here, so no path ever crosses.
     #[serde(

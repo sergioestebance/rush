@@ -45,11 +45,27 @@ server in front of those hosts. This is the simpler plan that replaced
   - `POST /api/sessions/{id}/op` sends one host op from an allowlist: send,
     allow/deny, interrupt, stop, model/effort/mode, stop_task, background,
     queue ops, away/back, limit (carry on at the reset or not), context,
-    tell (a subagent) and without. `send` wakes a sleeping host first
+    tell (a subagent), without and mcp. `send` wakes a sleeping host first
     (`host.Ensure`), as `rush session send` does. A send's images come as
     bytes (`pictures`: png, jpeg, gif or webp, at most 8, each under 20 MB, 64 MB a message);
     serve writes them to the session's scratch folder and the host reads them
     from there, so no client path ever reaches the agent.
+    `mcp` (`{"op": "mcp", "mcp": {NAME: {"command", "args"?, "env"?}}}`, on
+    the terms of a start's `mcp`) adds MCP servers to a session: only names
+    it doesn't run yet are added (a name it runs keeps its server; nothing
+    new is a 202 that changes nothing), kept in its config, at most 16 in
+    all. It wakes a stopped session as `send` does. A running Claude Code
+    takes the whole set live, mid-turn too (`mcp_set_servers`); an idle
+    agent that can't (Codex) is restarted on its conversation with them,
+    and a busy one gets them at its next start. serve sends the host the
+    servers as a list under a random id and waits up to 45 s for its
+    answer: 202 once taken; 502 with the host's reason (`the agent did not
+    take the MCP servers: …`, which a retry hands to the agent again);
+    502 `the session's host went away`; 504 `the session's host did not
+    answer`. An `mcp` op without servers, or servers on another op, is a
+    400. A host from before mcp ops (protocol under 13) is restarted on
+    this rush with the servers: at once between turns (202), else once its
+    turn ends (409 now, `the session's host is from before mcp ops: …`).
   - `POST /api/git` runs one read-only git command (`rev-parse`, `diff`,
     `ls-files`, `log`, `show` and the like) in a session's folder, or its
     repository's top. It's how the web app's *Changes* and an attached
