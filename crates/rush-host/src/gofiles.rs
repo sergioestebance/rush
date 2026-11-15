@@ -47,6 +47,42 @@ fn config_json_as_go_writes_it() {
     );
 }
 
+// The fork's host.go:63 (Config.MCP): a session's caller's MCP servers
+// sit after without in its config.json, each as the fork writes it.
+#[test]
+fn config_json_with_mcp_servers_as_the_fork_writes_it() {
+    let want = fixture("config_full.json").replacen(
+        "  \"from\": \"old\",\n",
+        concat!(
+            "  \"mcp\": [\n",
+            "    {\n",
+            "      \"name\": \"notes\",\n",
+            "      \"command\": \"/run/notes\"\n",
+            "    },\n",
+            "    {\n",
+            "      \"name\": \"threads\",\n",
+            "      \"command\": \"/run/threads\",\n",
+            "      \"args\": [\n",
+            "        \"serve\"\n",
+            "      ],\n",
+            "      \"env\": {\n",
+            "        \"TOKEN\": \"t\"\n",
+            "      }\n",
+            "    }\n",
+            "  ],\n",
+            "  \"from\": \"old\",\n",
+        ),
+        1,
+    );
+    let c = Config::parse(want.as_bytes()).unwrap();
+    assert_eq!(c.mcp.len(), 2);
+    assert_eq!(
+        (c.mcp[1].name.as_str(), c.mcp[1].args.as_slice()),
+        ("threads", ["serve".to_string()].as_slice())
+    );
+    assert_eq!(String::from_utf8(c.to_json_indent()).unwrap(), want);
+}
+
 #[test]
 fn info_json_as_go_writes_it() {
     for name in ["info_full.json", "info_empty.json"] {

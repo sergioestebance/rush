@@ -9,11 +9,12 @@
 //! stale.go:13-41 (BinStamp, Stale, Quiet, RestartDue), away.go:28-54
 //! (Away, Held), left.go:17-21 (Left), workspace.go:12-28 (Workspace),
 //! revive.go:23 (midTurn) and exchange.go (queueExchanges, trimExchanges).
+//! From the fork: host.go:63 (Config.MCP).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use rush_core::adapter::{Profile, migrated};
+use rush_core::adapter::{McpServer, Profile, migrated};
 use rush_core::agent::PreviewLine;
 use rush_core::event::{Exchange, PermissionMode, Question};
 use rush_core::usage::Change as UsageChange;
@@ -73,6 +74,13 @@ pub struct Config {
         deserialize_with = "nullvec::deserialize"
     )]
     pub without: Vec<String>,
+    /// The caller's own MCP servers the agent runs, in name order (the
+    /// fork's host.go:63, from a remote start or an mcp op).
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "nullvec::deserialize"
+    )]
+    pub mcp: Vec<McpServer>,
     /// What this session alone may do without asking, in Claude Code's
     /// rule syntax (StartOptions::allow); "$TMPDIR" in one is the
     /// session's scratch folder, filled in as it starts. Rust-only: the
