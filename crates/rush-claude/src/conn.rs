@@ -1,6 +1,8 @@
 //! A running `claude -p` as rush's Conn, and Claude as a Driver. Port of
 //! internal/adapters/claude/conn.go (Start with leanEnv at :105, relayOnly, conn and its parts,
 //! RunsSession), claude/carry.go (WriteCarried) and native.go's Neutral.
+//! From the fork: the caller's MCP servers (conn.go:172-173, :211-269,
+//! :316-321, :349).
 //!
 //! Go's conn reads the session's events on a goroutine of its own and hands
 //! them out on a channel. Here the session's reader thread calls the
@@ -17,7 +19,8 @@ use std::time::Duration;
 
 use rush_core::adapter::{
     self, Adopter, Answerer, Asker, Backgrounder, CacheKeeper, Conn, ContextReader, Driver, Hearer,
-    Homed, Input, Orphans, Responder, Sink, StartOptions, SubagentKeeper, TaskStopper, ToolServer,
+    Homed, Input, McpServer, Orphans, Responder, Sink, StartOptions, SubagentKeeper, TaskStopper,
+    ToolServer,
 };
 use rush_core::agent::PreviewLine;
 use rush_core::event::{self, Event};
@@ -124,6 +127,7 @@ impl Driver for Claude {
             root = true;
         }
         let tools = o.tools.clone();
+        let mcp = Arc::new(Mutex::new(o.mcp.clone()));
         let mut ho = headless::Options {
             account: acct.clone(),
             dir: o.dir.clone(),
@@ -133,7 +137,7 @@ impl Driver for Claude {
             binary: o.binary.clone(),
             ..headless::Options::default()
         };
-        let mut allowed = trusted(&tools);
+        let mut allowed = trusted(&tools, &o.mcp);
         // What this session alone may do without asking (the cleanup
         // agent's read-only commands): its flag, never anyone's settings.
         allowed.extend(o.allow.iter().cloned());
@@ -180,11 +184,19 @@ impl Driver for Claude {
                 json!({ "hooks": Value::Object(hooks) }).to_string(),
             ]);
         }
+        // The caller's own servers, beside rush's; their config may hold a
+        // token, so it goes when Claude Code does.
+        ho.flags.extend(mcp_flags(&o.mcp, &o.temp_dir)?);
+        let mcp_file = mcp_file(&o.mcp, &o.temp_dir);
         ho.flags.extend(o.flags.iter().cloned());
         let mut carried = String::new();
         if !o.carry.is_empty() && !o.resume && !o.fork && !o.session_id.is_empty() {
             // Another agent's conversation, resumed as this one's own.
-            write_carried(&acct, &o.dir, &o.session_id, &o.carry)?;
+            write_carried(&acct, &o.dir, &o.session_id, &o.carry).inspect_err(|_| {
+                if !mcp_file.is_empty() {
+                    let _ = std::fs::remove_file(&mcp_file);
+                }
+            })?;
             o.resume = true;
             carried = o.session_id.clone();
         }
@@ -239,16 +251,29 @@ impl Driver for Claude {
         ho.env.push(headless::CHECKPOINT_ENV.into());
         ho.env.extend(o.env.iter().cloned());
         let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
-        let taps = set_tap(&o, &tools, &mut ho);
+        let taps = set_tap(&o, &tools, &mcp, &mut ho);
         let login = crate::login::signed_in_as(&acct);
-        let (s, reader) = headless::start(&ho)?;
+        let (s, reader) = headless::start(&ho).inspect_err(|_| {
+            if !mcp_file.is_empty() {
+                let _ = std::fs::remove_file(&mcp_file);
+            }
+        })?;
         // Every process needs rush's tools registered before its first
         // message.
         let init_id = match s.initialize(&names) {
             Ok(id) => id,
             Err(e) => {
                 // Read to its end, so stopping it can tell it has.
-                reader.spawn(s.clone(), |_| {}, |_| {});
+                let file = mcp_file.clone();
+                reader.spawn(
+                    s.clone(),
+                    |_| {},
+                    move |_| {
+                        if !file.is_empty() {
+                            let _ = std::fs::remove_file(&file);
+                        }
+                    },
+                );
                 let _ = s.stop(Duration::from_secs(1));
                 return Err(e);
             }
@@ -257,6 +282,8 @@ impl Driver for Claude {
             s: s.clone(),
             sink,
             tools,
+            mcp,
+            mcp_file,
             init_id,
             carried: Mutex::new(carried),
             acct,
@@ -276,14 +303,21 @@ impl Driver for Claude {
     }
 }
 
-/// Points o's tap at ho's, but for rush's own tools' traffic, and has ho
-/// skip what's only relayed: whether it taps.
-fn set_tap(o: &StartOptions, tools: &[ToolServer], ho: &mut headless::Options) -> bool {
+/// Points o's tap at ho's, but for rush's own tools' traffic and the
+/// caller's servers' trusted calls, and has ho skip what's only relayed:
+/// whether it taps.
+fn set_tap(
+    o: &StartOptions,
+    tools: &[ToolServer],
+    mcp: &Arc<Mutex<Vec<McpServer>>>,
+    ho: &mut headless::Options,
+) -> bool {
     let taps = o.tap.is_some();
     if let Some(tap) = o.tap.clone() {
         let tools = tools.to_vec();
+        let mcp = mcp.clone();
         ho.tap = Some(Arc::new(move |line: &[u8]| {
-            if !own_traffic(&tools, line) {
+            if !own_traffic(&tools, &lock(&mcp), line) {
                 tap(line);
             }
         }));
@@ -305,6 +339,9 @@ fn serve(inner: Arc<Inner>, s: Arc<Session>, reader: headless::Reader) -> Box<dy
             move |ev| on.relay(&mut n, ev),
             move |e| {
                 end.ended.store(true, Ordering::SeqCst);
+                if !end.mcp_file.is_empty() {
+                    let _ = std::fs::remove_file(&end.mcp_file);
+                }
                 // Whoever waits on an answer hears the session has ended.
                 lock(&end.waits).clear();
                 end.sink.ended(e.map(|e| Box::new(e) as adapter::Error));
@@ -327,6 +364,8 @@ struct Passed {
     init_id: String,
     seq: i64,
     guard_pid: i32,
+    /// The caller's servers' config file, gone when Claude Code is.
+    mcp_file: String,
 }
 
 impl Adopter for Claude {
@@ -360,17 +399,20 @@ impl Adopter for Claude {
         };
         let acct = Account::at(&p.acct_name, &p.acct_dir);
         let tools = o.tools.clone();
+        let mcp = Arc::new(Mutex::new(o.mcp.clone()));
         let mut ho = headless::Options {
             account: acct.clone(),
             dir: o.dir.clone(),
             ..headless::Options::default()
         };
-        let taps = set_tap(&o, &tools, &mut ho);
+        let taps = set_tap(&o, &tools, &mcp, &mut ho);
         let (s, reader) = headless::adopt(&ho, k)?;
         let inner = Arc::new(Inner {
             s: s.clone(),
             sink,
             tools,
+            mcp,
+            mcp_file: p.mcp_file,
             init_id: p.init_id,
             carried: Mutex::new(String::new()),
             acct,
@@ -433,6 +475,7 @@ impl adapter::Upgrader for ClaudeConn {
             init_id: c.init_id.clone(),
             seq: k.seq,
             guard_pid,
+            mcp_file: c.mcp_file.clone(),
         };
         Ok(adapter::Upgrade {
             pid: k.pid,
@@ -472,8 +515,10 @@ fn tool_of<'a>(tools: &'a [ToolServer], name: &'a str) -> Option<(&'a ToolServer
     })
 }
 
-/// The tools that never ask, by Claude Code's names.
-fn trusted(tools: &[ToolServer]) -> Vec<String> {
+/// The tools that never ask, by Claude Code's names: rush's own trusted
+/// ones, and every tool of the caller's servers, which it chose
+/// (conn.go:211).
+fn trusted(tools: &[ToolServer], mcp: &[McpServer]) -> Vec<String> {
     tools
         .iter()
         .flat_map(|t| {
@@ -481,17 +526,99 @@ fn trusted(tools: &[ToolServer]) -> Vec<String> {
                 .iter()
                 .map(move |n| format!("mcp__{}__{n}", t.name))
         })
+        .chain(mcp.iter().map(|m| format!("mcp__{}", m.name)))
         .collect()
 }
 
-fn is_trusted(tools: &[ToolServer], name: &str) -> bool {
-    tool_of(tools, name).is_some_and(|(t, n)| t.trusted.iter().any(|x| x == n))
+/// Whether a tool of Claude Code's name never asks (conn.go:316).
+fn is_trusted(tools: &[ToolServer], mcp: &[McpServer], name: &str) -> bool {
+    if let Some((t, n)) = tool_of(tools, name) {
+        return t.trusted.iter().any(|x| x == n);
+    }
+    mcp.iter().any(|m| {
+        name.strip_prefix("mcp__")
+            .and_then(|r| r.strip_prefix(m.name.as_str()))
+            .is_some_and(|r| r.starts_with("__"))
+    })
+}
+
+/// One of a caller's MCP servers in Claude Code's own words (conn.go:224).
+/// Args is always there, [] when it has none: Claude Code fails a live add
+/// (mcp_set_servers) of a server without them.
+#[derive(serde::Serialize)]
+struct StdioServer<'a> {
+    #[serde(rename = "type")]
+    typ: &'static str,
+    command: &'a str,
+    args: &'a [String],
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    env: &'a BTreeMap<String, String>,
+}
+
+/// servers in Claude Code's own words, by name (conn.go:235, mcpConfig).
+fn mcp_config(servers: &[McpServer]) -> BTreeMap<&str, StdioServer<'_>> {
+    servers
+        .iter()
+        .map(|m| {
+            (
+                m.name.as_str(),
+                StdioServer {
+                    typ: "stdio",
+                    command: &m.command,
+                    args: &m.args,
+                    env: &m.env,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The caller's MCP config in the session's scratch folder (conn.go:248).
+const MCP_CONFIG_FILE: &str = "mcp-config.json";
+
+/// Where mcp_flags puts the config of servers with scratch folder dir:
+/// "" for none, or one given inline.
+fn mcp_file(servers: &[McpServer], dir: &str) -> String {
+    if servers.is_empty() || dir.is_empty() {
+        return String::new();
+    }
+    Path::new(dir)
+        .join(MCP_CONFIG_FILE)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The flags that give Claude Code a caller's MCP servers, beside rush's
+/// own (conn.go:253, mcpFlags). With a scratch folder dir the config is a
+/// file there only the user reads, so a server's environment (a token,
+/// say) never shows on the command line.
+fn mcp_flags(servers: &[McpServer], dir: &str) -> adapter::Result<Vec<String>> {
+    if servers.is_empty() {
+        return Ok(Vec::new());
+    }
+    #[derive(serde::Serialize)]
+    struct Config<'a> {
+        #[serde(rename = "mcpServers")]
+        mcp_servers: BTreeMap<&'a str, StdioServer<'a>>,
+    }
+    let b = serde_json::to_string(&Config {
+        mcp_servers: mcp_config(servers),
+    })?;
+    let path = mcp_file(servers, dir);
+    if path.is_empty() {
+        return Ok(vec!["--mcp-config".into(), b]);
+    }
+    crate::files::mkdir_private(Path::new(dir))?;
+    // Written afresh, so one left with a wider mode doesn't keep it.
+    let _ = std::fs::remove_file(&path);
+    crate::files::write_file_atomic(Path::new(&path), b.as_bytes(), 0o600)?;
+    Ok(vec!["--mcp-config".into(), path])
 }
 
 /// A control request for rush's own tools: an MCP message, or a
-/// permission check for one that never asks. It stays between Claude Code
-/// and rush.
-fn own_traffic(tools: &[ToolServer], l: &[u8]) -> bool {
+/// permission check for one that never asks (the caller's servers' among
+/// them). It stays between Claude Code and rush.
+fn own_traffic(tools: &[ToolServer], mcp: &[McpServer], l: &[u8]) -> bool {
     if !l.starts_with(br#"{"type":"control_request""#) {
         return false;
     }
@@ -515,7 +642,7 @@ fn own_traffic(tools: &[ToolServer], l: &[u8]) -> bool {
     (sub == "mcp_message"
         && r.server_name
             .is_some_and(|s| tools.iter().any(|t| t.name == s)))
-        || (sub == "can_use_tool" && r.tool_name.is_some_and(|n| is_trusted(tools, &n)))
+        || (sub == "can_use_tool" && r.tool_name.is_some_and(|n| is_trusted(tools, mcp, &n)))
 }
 
 /// The reading in raw as the login's, when it is one and not the last one
@@ -547,6 +674,11 @@ struct Inner {
     s: Arc<Session>,
     sink: Arc<dyn Sink>,
     tools: Vec<ToolServer>,
+    /// The caller's own servers Claude Code runs (conn.go:172): shared with
+    /// the tap, which keeps their trusted calls off it.
+    mcp: Arc<Mutex<Vec<McpServer>>>,
+    /// Their config, which may hold a token: gone when Claude Code is.
+    mcp_file: String,
     init_id: String,
     /// Imported history, acknowledged by initialize.
     carried: Mutex<String>,
@@ -597,9 +729,10 @@ impl Inner {
     fn own(&self, ev: &HEvent) -> bool {
         match ev {
             HEvent::PermissionRequest(e) => {
-                if is_trusted(&self.tools, &e.tool) {
+                if is_trusted(&self.tools, &lock(&self.mcp), &e.tool) {
                     // Asked despite --allowedTools (a mode that asks for
-                    // everything): they only draw, so yes.
+                    // everything, or a caller's tool): they only draw, or
+                    // the caller chose them, so yes.
                     let _ = self.s.allow(e, None, false);
                     return true;
                 }
