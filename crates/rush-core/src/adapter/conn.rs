@@ -1,5 +1,6 @@
 //! A running session, and what a session rush hosts can do beyond it.
-//! After Go's internal/agent: adapter.go (Conn, Answerer) and conn.go.
+//! After Go's internal/agent: adapter.go (Conn, Answerer) and conn.go;
+//! the fork's conn.go:43-47 (MCPSetter).
 //!
 //! Each optional part is a Go interface a Conn has only when its agent
 //! can; here a method on [`Conn`] hands it out, None by default. The host
@@ -16,7 +17,7 @@ use std::sync::mpsc::Sender;
 
 use serde_json::value::RawValue;
 
-use super::{Input, Result};
+use super::{Input, McpServer, Result};
 use crate::event::Event;
 use crate::time::Ms;
 use crate::usage;
@@ -114,6 +115,11 @@ pub trait Conn: Send + Sync {
     fn effort_setter(&self) -> Option<&dyn EffortSetter> {
         None
     }
+    /// It takes its caller's MCP servers while it runs, mid-turn too: see
+    /// [`McpSetter`] (the fork's conn.go:45).
+    fn mcp_setter(&self) -> Option<&dyn McpSetter> {
+        None
+    }
     /// The session holds a sign-in its profile has since left: it should
     /// rest once its turn ends, and pick up on the new one (Go's Staler).
     fn stale(&self) -> bool {
@@ -146,6 +152,13 @@ pub trait Conn: Send + Sync {
 /// `interface{ SetEffort(string) error }`, host.go:2089).
 pub trait EffortSetter {
     fn set_effort(&self, effort: &str) -> Result<()>;
+}
+
+/// Takes its caller's MCP servers while it runs, mid-turn too: the whole
+/// set, in place of the ones it had (the fork's conn.go:45, MCPSetter).
+/// An error is the agent's refusal: it runs on with the ones it had.
+pub trait McpSetter {
+    fn set_mcp(&self, servers: &[McpServer]) -> Result<()>;
 }
 
 /// Takes answers to a Question: each Ask's chosen labels, keyed by the
