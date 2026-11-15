@@ -1,0 +1,817 @@
+{
+ "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203",
+ "at": "2026-11-15T12:46:27Z",
+ "metrics": {
+  "binary: rush, release": {
+   "kind": "binary",
+   "value": 63905928,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "follow a run: read on, each write, allocated": {
+   "kind": "bytes",
+   "value": 18664666,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "follow a run: read on, each write, allocations made": {
+   "kind": "allocs",
+   "value": 62060,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "follow a run: read whole, shared, each write, allocated": {
+   "kind": "bytes",
+   "value": 2404059066,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "follow a run: read whole, shared, each write, allocations made": {
+   "kind": "allocs",
+   "value": 10082016,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "follow a run: read whole, shared, once a second, allocated": {
+   "kind": "bytes",
+   "value": 284848930,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "follow a run: read whole, shared, once a second, allocations made": {
+   "kind": "allocs",
+   "value": 1057820,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, ctrl+k open: down or up, then the frame, allocations": {
+   "kind": "allocs",
+   "value": 3855,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, ctrl+k open: down or up, then the frame, bytes": {
+   "kind": "bytes",
+   "value": 715030,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, ctrl+k open: frame drawn (rows + cells), allocations": {
+   "kind": "allocs",
+   "value": 3850,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, ctrl+k open: frame drawn (rows + cells), bytes": {
+   "kind": "bytes",
+   "value": 714905,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, the list: down or up, then the frame, allocations": {
+   "kind": "allocs",
+   "value": 2934,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, the list: down or up, then the frame, bytes": {
+   "kind": "bytes",
+   "value": 532493,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, the list: frame drawn (rows + cells), allocations": {
+   "kind": "allocs",
+   "value": 2560,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, the list: frame drawn (rows + cells), bytes": {
+   "kind": "bytes",
+   "value": 500197,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, the list: rows (Model::frame), allocations": {
+   "kind": "allocs",
+   "value": 2557,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "frame, the list: rows (Model::frame), bytes": {
+   "kind": "bytes",
+   "value": 500160,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "host: CPU to start, s": {
+   "kind": "info",
+   "value": 0.118,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "host: footprint": {
+   "kind": "footprint",
+   "value": 3884416,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "host: idle CPU": {
+   "kind": "cpu",
+   "value": 0.0018,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "host: idle wake-ups": {
+   "kind": "wakeups",
+   "value": 2.0,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "host: threads": {
+   "kind": "threads",
+   "value": 7,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list, past left out (the feed's): loader alone, allocations kept": {
+   "kind": "allocs",
+   "value": 15004,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list, past left out (the feed's): loader alone, retained": {
+   "kind": "heap",
+   "value": 2552014,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list, past left out (the feed's): rows": {
+   "kind": "info",
+   "value": 400,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list: a reading, allocations made": {
+   "kind": "allocs",
+   "value": 25248,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list: loader alone, allocations kept": {
+   "kind": "allocs",
+   "value": 23077,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list: loader alone, retained": {
+   "kind": "heap",
+   "value": 4255528,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list: loader and reading, retained": {
+   "kind": "heap",
+   "value": 5444977,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list: rows": {
+   "kind": "info",
+   "value": 641,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list: rows, allocations kept": {
+   "kind": "allocs",
+   "value": 7934,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "list: rows, retained": {
+   "kind": "heap",
+   "value": 1186995,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "menu bar feed: every row, retained": {
+   "kind": "heap",
+   "value": 518290,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "menu bar feed: rows kept, retained": {
+   "kind": "heap",
+   "value": 3686,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "menubar feed: CPU to start, s": {
+   "kind": "info",
+   "value": 0.148,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "menubar feed: footprint": {
+   "kind": "footprint",
+   "value": 13894976,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "menubar feed: idle CPU": {
+   "kind": "cpu",
+   "value": 0.0,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "menubar feed: idle wake-ups": {
+   "kind": "wakeups",
+   "value": 0.0,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "menubar feed: threads": {
+   "kind": "threads",
+   "value": 4,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open last 2 MB: allocated": {
+   "kind": "bytes",
+   "value": 11912006,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open last 2 MB: allocations kept": {
+   "kind": "allocs",
+   "value": 5283,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open last 2 MB: allocations made": {
+   "kind": "allocs",
+   "value": 27431,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open last 2 MB: peak": {
+   "kind": "heap",
+   "value": 1703994,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open last 2 MB: retained": {
+   "kind": "heap",
+   "value": 1615178,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file, fetch+apply: allocated": {
+   "kind": "bytes",
+   "value": 58794734,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file, fetch+apply: allocations kept": {
+   "kind": "allocs",
+   "value": 25910,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file, fetch+apply: allocations made": {
+   "kind": "allocs",
+   "value": 134234,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file, fetch+apply: peak": {
+   "kind": "heap",
+   "value": 21250576,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file, fetch+apply: retained": {
+   "kind": "heap",
+   "value": 7527991,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file: allocated": {
+   "kind": "bytes",
+   "value": 46385612,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file: allocations kept": {
+   "kind": "allocs",
+   "value": 25910,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file: allocations made": {
+   "kind": "allocs",
+   "value": 134234,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file: peak": {
+   "kind": "heap",
+   "value": 7613065,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole file: retained": {
+   "kind": "heap",
+   "value": 7527991,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole session, copied: allocated": {
+   "kind": "bytes",
+   "value": 7015927,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole session, copied: allocations kept": {
+   "kind": "allocs",
+   "value": 25909,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole session, copied: allocations made": {
+   "kind": "allocs",
+   "value": 25909,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole session, copied: peak": {
+   "kind": "heap",
+   "value": 7015927,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open whole session, copied: retained": {
+   "kind": "heap",
+   "value": 7015927,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open: its subagent runs, retained": {
+   "kind": "heap",
+   "value": 1744480,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open: subagent runs followed, allocations kept": {
+   "kind": "allocs",
+   "value": 43,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open: subagent runs followed, allocations made": {
+   "kind": "allocs",
+   "value": 32397,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open: subagent runs followed, peak": {
+   "kind": "heap",
+   "value": 379480,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "open: subagent runs followed, retained": {
+   "kind": "heap",
+   "value": 9499,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "plugind: CPU to start, s": {
+   "kind": "info",
+   "value": 0.047,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "plugind: footprint": {
+   "kind": "footprint",
+   "value": 4720000,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "plugind: idle CPU": {
+   "kind": "cpu",
+   "value": 0.0129,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "plugind: idle wake-ups": {
+   "kind": "wakeups",
+   "value": 15.8,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "plugind: threads": {
+   "kind": "threads",
+   "value": 9,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 1386,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 509298,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: cold jump to the top (window), allocations": {
+   "kind": "allocs",
+   "value": 4100,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: cold jump to the top (window), bytes": {
+   "kind": "bytes",
+   "value": 942122,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: cold layout (all turns), allocations": {
+   "kind": "allocs",
+   "value": 202359,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: cold layout (all turns), bytes": {
+   "kind": "bytes",
+   "value": 30821925,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: stream: delta, then a frame, allocations": {
+   "kind": "allocs",
+   "value": 91,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: stream: delta, then a frame, bytes": {
+   "kind": "bytes",
+   "value": 15956,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 75,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 9866,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: warm frame mid-way (range), allocations": {
+   "kind": "allocs",
+   "value": 73,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w120: warm frame mid-way (range), bytes": {
+   "kind": "bytes",
+   "value": 7898,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 1386,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 509355,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: cold jump to the top (window), allocations": {
+   "kind": "allocs",
+   "value": 4100,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: cold jump to the top (window), bytes": {
+   "kind": "bytes",
+   "value": 942275,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: cold layout (all turns), allocations": {
+   "kind": "allocs",
+   "value": 136083,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: cold layout (all turns), bytes": {
+   "kind": "bytes",
+   "value": 20883663,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: stream: delta, then a frame, allocations": {
+   "kind": "allocs",
+   "value": 91,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: stream: delta, then a frame, bytes": {
+   "kind": "bytes",
+   "value": 15973,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 75,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 9874,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: warm frame mid-way (range), allocations": {
+   "kind": "allocs",
+   "value": 73,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 300 turns w250: warm frame mid-way (range), bytes": {
+   "kind": "bytes",
+   "value": 7906,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: catch-up: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 2194,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: catch-up: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 3054204,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: catch-up: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 329,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: catch-up: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 49143,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: catch-up: warm frame mid-way, allocations": {
+   "kind": "allocs",
+   "value": 327,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: catch-up: warm frame mid-way, bytes": {
+   "kind": "bytes",
+   "value": 47751,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: chat: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 1118,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: chat: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 3078114,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: chat: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 98,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: chat: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 14649,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: chat: warm frame mid-way, allocations": {
+   "kind": "allocs",
+   "value": 96,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: chat: warm frame mid-way, bytes": {
+   "kind": "bytes",
+   "value": 12737,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: code: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 1288,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: code: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 3129068,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: code: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 34,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: code: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 5217,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: code: warm frame mid-way, allocations": {
+   "kind": "allocs",
+   "value": 32,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: code: warm frame mid-way, bytes": {
+   "kind": "bytes",
+   "value": 3497,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 4085,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 3002074,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: cold jump to the top (window), allocations": {
+   "kind": "allocs",
+   "value": 6961,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: cold jump to the top (window), bytes": {
+   "kind": "bytes",
+   "value": 3442937,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: cold layout (all turns), allocations": {
+   "kind": "allocs",
+   "value": 2925183,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: cold layout (all turns), bytes": {
+   "kind": "bytes",
+   "value": 285501075,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: answer applied (full story), allocations": {
+   "kind": "allocs",
+   "value": 1391,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: answer applied (full story), bytes": {
+   "kind": "bytes",
+   "value": 133566,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 955,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 3027776,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: delta, nothing new, allocations": {
+   "kind": "allocs",
+   "value": 2,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: delta, nothing new, bytes": {
+   "kind": "bytes",
+   "value": 116,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: first delta (3 turns), allocations": {
+   "kind": "allocs",
+   "value": 77,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: first delta (3 turns), bytes": {
+   "kind": "bytes",
+   "value": 18318,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: prompt (full story), allocations": {
+   "kind": "allocs",
+   "value": 681,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: prompt (full story), bytes": {
+   "kind": "bytes",
+   "value": 98264,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: story changed, then a frame, allocations": {
+   "kind": "allocs",
+   "value": 946,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: story changed, then a frame, bytes": {
+   "kind": "bytes",
+   "value": 210951,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 2,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 960,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: warm frame mid-way, allocations": {
+   "kind": "allocs",
+   "value": 0,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: live: warm frame mid-way, bytes": {
+   "kind": "bytes",
+   "value": 0,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: normal: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 4085,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: normal: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 3002074,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: normal: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 74,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: normal: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 9817,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: normal: warm frame mid-way, allocations": {
+   "kind": "allocs",
+   "value": 72,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: normal: warm frame mid-way, bytes": {
+   "kind": "bytes",
+   "value": 7849,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: stream: delta, then a frame, allocations": {
+   "kind": "allocs",
+   "value": 90,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: stream: delta, then a frame, bytes": {
+   "kind": "bytes",
+   "value": 15902,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: trail: cold frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 1244,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: trail: cold frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 2973036,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: trail: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 81,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: trail: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 8682,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: trail: warm frame mid-way, allocations": {
+   "kind": "allocs",
+   "value": 79,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: trail: warm frame mid-way, bytes": {
+   "kind": "bytes",
+   "value": 7202,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: warm frame at the end, allocations": {
+   "kind": "allocs",
+   "value": 74,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: warm frame at the end, bytes": {
+   "kind": "bytes",
+   "value": 9817,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: warm frame mid-way (range), allocations": {
+   "kind": "allocs",
+   "value": 72,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "render 3000 turns w120: warm frame mid-way (range), bytes": {
+   "kind": "bytes",
+   "value": 7849,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "serve: CPU to start, s": {
+   "kind": "info",
+   "value": 0.198,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "serve: a listing, retained": {
+   "kind": "heap",
+   "value": 2547846,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "serve: footprint": {
+   "kind": "footprint",
+   "value": 6538560,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "serve: idle CPU": {
+   "kind": "cpu",
+   "value": 0.3939,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "serve: idle wake-ups": {
+   "kind": "wakeups",
+   "value": 97.5,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "serve: threads": {
+   "kind": "threads",
+   "value": 7,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "ui: CPU to start, s": {
+   "kind": "info",
+   "value": 1.077,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "ui: footprint": {
+   "kind": "footprint",
+   "value": 29296128,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "ui: idle CPU": {
+   "kind": "cpu",
+   "value": 0.2139,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "ui: idle wake-ups": {
+   "kind": "wakeups",
+   "value": 188.0,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  },
+  "ui: threads": {
+   "kind": "threads",
+   "value": 8,
+   "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
+  }
+ },
+ "flagged": []
+}
