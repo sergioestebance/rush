@@ -1308,3 +1308,141 @@ fn start_refuses_unfit_labels_forks_and_programs() {
         assert!(started.lock().unwrap().is_none(), "{name}: it started");
     }
 }
+
+/// MCP servers by name, each run by command, as a start or an mcp op
+/// names them.
+fn mcp_of(names: &[&str], command: &str) -> Value {
+    names
+        .iter()
+        .map(|n| (n.to_string(), serde_json::json!({ "command": command })))
+        .collect::<serde_json::Map<String, Value>>()
+        .into()
+}
+
+/// What a start or an mcp op may not name, on a serve with programs
+/// folders, and the 403's reason for each (the fork's server.go:462-484,
+/// allowedMCP): a program outside them, a name of rush's own (its tools'
+/// server, or a plugin's), one an agent can't put in its tools' names,
+/// and an environment a program of the serve's own may not be given.
+fn unfit_mcp(prog: &str, stray: &str) -> Vec<(&'static str, Value, String)> {
+    let many: Vec<String> = (0..17).map(|i| format!("s{i}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    let long = "n".repeat(65);
+    vec![
+        (
+            "another folder",
+            mcp_of(&["x"], stray),
+            "MCP server x: that program isn't in one of this serve's program folders".into(),
+        ),
+        (
+            "rush's own",
+            mcp_of(&["rush"], prog),
+            "an MCP server can't be named \"rush\"".into(),
+        ),
+        (
+            "a plugin's",
+            mcp_of(&["rush-notes"], prog),
+            "an MCP server can't be named \"rush-notes\"".into(),
+        ),
+        (
+            "a bad name",
+            mcp_of(&["A B"], prog),
+            "an MCP server can't be named \"A B\"".into(),
+        ),
+        (
+            "a long name",
+            mcp_of(&[&long], prog),
+            format!("an MCP server can't be named \"{long}\""),
+        ),
+        (
+            "no program",
+            serde_json::json!({"x": {}}),
+            "MCP server x: the program must be a full path".into(),
+        ),
+        (
+            "a rush variable",
+            serde_json::json!({"x": {"command": prog, "env": {"RUSH_SESSION": "y"}}}),
+            "MCP server x: RUSH_SESSION is rush's own".into(),
+        ),
+        (
+            "a bad variable",
+            serde_json::json!({"x": {"command": prog, "env": {"A=B": "y"}}}),
+            "MCP server x: the environment variable \"A=B\" can't be set".into(),
+        ),
+        (
+            "too many",
+            mcp_of(&many, prog),
+            "at most 16 MCP servers".into(),
+        ),
+    ]
+}
+
+// The fork's programs_test.go:111 (TestStartMCPOnlyFromServeFolders): a
+// start's MCP servers reach the host only from a serve told to take
+// programs, each server's program from one of its folders, as a list in
+// name order; one named without args or env (a client's own MCP server,
+// as it names it) has none.
+#[test]
+fn start_takes_mcp_servers_only_from_serve_folders() {
+    let _h = home();
+    let progs = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let prog = progs.path().join("threads-mcp");
+    let stray = other.path().join("threads-mcp");
+    program(&prog);
+    program(&stray);
+    let (p, st) = (prog.to_string_lossy(), stray.to_string_lossy());
+    let b = bearer(TOKEN);
+    let hdr = [
+        ("Authorization", b.as_str()),
+        ("Content-Type", "application/json"),
+    ];
+    let start = |s: &Arc<Server>, mcp: Value| {
+        let body = serde_json::json!({"cwd": "/work", "agent": "claude", "mcp": mcp});
+        call(s, "POST", "/api/sessions", &body.to_string(), &hdr)
+    };
+    let good = serde_json::json!({
+        "threads": {"command": p, "args": ["serve"]},
+        "notes": {"command": p},
+    });
+
+    let (s, started) = starting_server(vec![]);
+    let r = start(&s, good.clone());
+    let got: Value = serde_json::from_slice(r.bytes()).unwrap_or_default();
+    assert_eq!(
+        (r.status, got["error"].as_str().unwrap_or("")),
+        (
+            403,
+            "this serve runs only the agents' own programs, with their own environment"
+        ),
+        "no folders"
+    );
+    assert!(started.lock().unwrap().is_none(), "no folders: it started");
+
+    let (s, started) = starting_server(vec![progs.path().to_path_buf()]);
+    let r = start(&s, good);
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(r.bytes()));
+    let got = started.lock().unwrap().clone().unwrap().mcp_list();
+    let server = |name: &str, args: &[&str]| rush_core::adapter::McpServer {
+        name: name.into(),
+        command: p.to_string(),
+        args: args.iter().map(|a| a.to_string()).collect(),
+        ..Default::default()
+    };
+    assert_eq!(
+        got,
+        vec![server("notes", &[]), server("threads", &["serve"])]
+    );
+
+    for (name, mcp, want) in unfit_mcp(&p, &st) {
+        let (s, started) = starting_server(vec![progs.path().to_path_buf()]);
+        let r = start(&s, mcp);
+        let got: Value = serde_json::from_slice(r.bytes()).unwrap_or_default();
+        assert_eq!(
+            (r.status, got["error"].as_str().unwrap_or("")),
+            (403, want.as_str()),
+            "{name}"
+        );
+        assert!(started.lock().unwrap().is_none(), "{name}: it started");
+    }
+}
