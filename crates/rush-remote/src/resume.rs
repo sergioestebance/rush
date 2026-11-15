@@ -7,7 +7,8 @@
 //! tailBytes :26-28, sendFileTail :151, frame :166, cursor :181, place
 //! :191, parseCursor :193, cutFrame :209, history :217, fileTail :253,
 //! sessionTail :265, readTurns :275, isUserTurn :300, userTurns :316,
-//! pickTurns :332).
+//! pickTurns :332), with topUp :124 as ring_from: what the fork's host
+//! says in its reset, this reads from the host's info.
 
 use std::collections::BTreeMap;
 
@@ -32,6 +33,23 @@ pub(crate) const TAIL_BYTES: usize = 1 << 20;
 pub(crate) struct Place {
     pub skip: usize,
     pub part: usize,
+}
+
+/// Where a running host's ring starts, zero when it holds the whole
+/// conversation: where it trimmed its replay to, or else when the host
+/// started, or rewound, for one that resumed a transcript (a stopped chat
+/// woken by a send) whose turns from before then are only in the file.
+/// The transcript is read from before it, so one that holds nothing older
+/// sends nothing.
+pub(crate) fn ring_from(info: &Info) -> Time {
+    if !info.replay_from.is_zero() {
+        return info.replay_from;
+    }
+    if info.rewound_at.to_ms() > info.started_at.to_ms() {
+        info.rewound_at
+    } else {
+        info.started_at
+    }
 }
 
 /// Sends the tail of what a session's transcript holds from before before

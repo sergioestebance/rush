@@ -44,7 +44,7 @@ use crate::expose::{Log, Up, expose, fields, say};
 use crate::http::{self, Request, Response};
 use crate::pair::{PairCodes, Pairing};
 use crate::push::{Notice, Push, Subscription};
-use crate::resume::send_file_tail;
+use crate::resume::{ring_from, send_file_tail};
 
 /// A new session as a remote client asks for it: what the web app's form
 /// offers, and nothing that reaches past the agent.
@@ -1106,12 +1106,13 @@ impl Server {
                             let mut emit = |b: Vec<u8>| {
                                 sse(w, Some(&b));
                             };
-                            if info.replay_from.is_zero() {
+                            let from = ring_from(&info);
+                            if from.is_zero() {
                                 // The ring holds the whole conversation.
                             } else if full {
-                                send_history(&reg, &info, info.replay_from, full, &mut emit);
+                                send_history(&reg, &info, from, full, &mut emit);
                             } else {
-                                send_file_tail(&reg, &info, info.replay_from, &mut emit);
+                                send_file_tail(&reg, &info, from, &mut emit);
                             }
                             let ok = pump(&ctx, &c, w, !full);
                             c.close();

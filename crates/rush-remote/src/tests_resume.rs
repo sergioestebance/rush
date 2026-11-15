@@ -754,7 +754,26 @@ fn a_running_hosts_stream_starts_with_the_turns_before_its_replay() {
     let lines = turns(30);
     let from = Time::from_ms(lines[50].0); // q25
     let info = session("e6e6e6e6", &lines, std::process::id() as i64, from);
-    let ln = UnixListener::bind(rush_host::sock_path("e6e6e6e6")).unwrap();
+    host_says(info);
+    let got = through_synced(&s, "/api/sessions/e6e6e6e6/events");
+    let kinds: Vec<String> = got.iter().map(|f| kind_of(f)).collect();
+    assert_eq!(&kinds[..2], ["reset", "cut"], "{kinds:?}");
+    assert_eq!(&kinds[kinds.len() - 2..], ["info", "synced"], "{kinds:?}");
+    assert_eq!(before_of(&got[1]), format!("{}.10", from.to_ms()));
+    assert_eq!(texts(&got), range(15, 25));
+}
+
+/// Writes info as its session's info file.
+fn write_info(info: Info) -> Info {
+    let p = rush_host::dir(&info.id).join("info.json");
+    std::fs::write(p, serde_json::to_vec(&info).unwrap()).unwrap();
+    info
+}
+
+/// A host on the socket of info's session that sends each client its info
+/// and nothing else.
+fn host_says(info: Info) {
+    let ln = UnixListener::bind(rush_host::sock_path(&info.id)).unwrap();
     std::thread::spawn(move || {
         for c in ln.incoming() {
             let Ok(mut c) = c else { return };
@@ -768,12 +787,49 @@ fn a_running_hosts_stream_starts_with_the_turns_before_its_replay() {
             });
         }
     });
-    let got = through_synced(&s, "/api/sessions/e6e6e6e6/events");
+}
+
+/// A host that resumed a transcript (a stopped chat woken by a send) has
+/// only what came after its start in its ring: the turns before it come
+/// from the transcript, as a cold chat's would, with the cut first. One
+/// that started the conversation has nothing before its start to send.
+#[test]
+fn a_woken_hosts_stream_starts_with_the_turns_before_it_started() {
+    let _h = home();
+    let s = server();
+    let lines = turns(30);
+    let mut info = session(
+        "e7e7e7e7",
+        &lines,
+        std::process::id() as i64,
+        Time::default(),
+    );
+    info.started_at = Time::from_ms(lines[59].0 + 1000);
+    host_says(write_info(info.clone()));
+    let got = through_synced(&s, "/api/sessions/e7e7e7e7/events");
     let kinds: Vec<String> = got.iter().map(|f| kind_of(f)).collect();
     assert_eq!(&kinds[..2], ["reset", "cut"], "{kinds:?}");
     assert_eq!(&kinds[kinds.len() - 2..], ["info", "synced"], "{kinds:?}");
-    assert_eq!(before_of(&got[1]), format!("{}.10", from.to_ms()));
-    assert_eq!(texts(&got), range(15, 25));
+    assert_eq!(
+        before_of(&got[1]),
+        format!("{}.10", info.started_at.to_ms())
+    );
+    assert_eq!(texts(&got), range(20, 30));
+    assert_eq!(page(&s, "e7e7e7e7", &before_of(&got[1]))[1..].len(), 20);
+
+    let mut fresh = session(
+        "e8e8e8e8",
+        &lines,
+        std::process::id() as i64,
+        Time::default(),
+    );
+    fresh.started_at = Time::from_ms(lines[0].0 - 1000);
+    host_says(write_info(fresh));
+    let kinds: Vec<String> = through_synced(&s, "/api/sessions/e8e8e8e8/events")
+        .iter()
+        .map(|f| kind_of(f))
+        .collect();
+    assert_eq!(kinds, ["reset", "info", "synced"]);
 }
 
 /// A stream of all of it (?full=1) is as it was: every event, no cursor.
