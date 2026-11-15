@@ -53,6 +53,20 @@ impl Driver for Harness {
 /// Kimi as their adapters say what they take, and gives what its agent
 /// was started with and the host.
 fn started(id: &str, kind: &'static str, headless: bool) -> (StartOptions, Host) {
+    started_with(
+        kind,
+        Config {
+            id: id.into(),
+            kind: kind.into(),
+            headless,
+            ..Config::default()
+        },
+    )
+}
+
+/// started, from a config of its own.
+fn started_with(kind: &'static str, cfg: Config) -> (StartOptions, Host) {
+    let id = cfg.id.clone();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let reg = Registry::new();
     for (k, claude, prompt) in [
@@ -74,17 +88,8 @@ fn started(id: &str, kind: &'static str, headless: bool) -> (StartOptions, Host)
             },
         });
     }
-    std::fs::create_dir_all(crate::paths::dir(id)).unwrap();
-    let (h, _rx) = build(
-        reg,
-        Hooks::quiet(),
-        Config {
-            id: id.into(),
-            kind: kind.into(),
-            headless,
-            ..Config::default()
-        },
-    );
+    std::fs::create_dir_all(crate::paths::dir(&id)).unwrap();
+    let (h, _rx) = build(reg, Hooks::quiet(), cfg);
     let (g, r) = h.start(h.lock());
     drop(g);
     r.unwrap();
@@ -163,5 +168,35 @@ fn a_headless_run_is_told_nothing_rush_draws() {
         for part in [SHELL_PROMPT, FORMAT_PROMPT, TASKS_PROMPT] {
             assert!(!o.prompt.contains(part), "{kind}");
         }
+    }
+}
+
+/// A session run through a program of its own (a client's wrapper, which
+/// starts its agent with a cleared environment in a sandbox) is given no
+/// kept folder: no $RUSH_KEEP, and no word of one in its prompt, which
+/// would send it to a path it can't see or write. Its scratch folder is
+/// still its own. One on the agent's own program has both.
+#[test]
+fn a_wrapped_session_is_told_of_no_kept_folder() {
+    let _home = Home::new();
+    for (id, binary, kept) in [("kplain", "", true), ("kwrapped", "/run/agent-1", false)] {
+        let (o, _h) = started_with(
+            "claude",
+            Config {
+                id: id.into(),
+                kind: "claude".into(),
+                binary: binary.into(),
+                ..Config::default()
+            },
+        );
+        let has_env = o.env.iter().any(|e| e.starts_with("RUSH_KEEP="));
+        assert_eq!(has_env, kept, "{id}: RUSH_KEEP in {:?}", o.env);
+        assert_eq!(
+            o.prompt.contains("$RUSH_KEEP"),
+            kept,
+            "{id}: keep in its prompt"
+        );
+        assert!(o.prompt.contains("in $TMPDIR"), "{id}: no scratch folder");
+        assert!(o.env.iter().any(|e| e.starts_with("TMPDIR=")), "{id}");
     }
 }

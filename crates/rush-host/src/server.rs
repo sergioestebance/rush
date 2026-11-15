@@ -159,9 +159,28 @@ const ONLINE_EVERY: Duration = Duration::from_secs(5);
 /// tasks view.
 pub const TASKS_PROMPT: &str = "You are running inside rush, which shows your task list (todo list or plan) to the user live. For any work with more than two steps, write the steps to your task list before starting, keep exactly one in progress, and mark each done as you finish it.";
 
+/// What rush tells an agent of its scratch folder, with $keep (what it
+/// tells of its kept folder, or nothing) between.
+macro_rules! scratch_prompt {
+    ($keep:expr) => {
+        concat!(
+            "Put scratch files (clones, downloads, builds, caches) in $TMPDIR, never /tmp or elsewhere outside the project: $TMPDIR is this session's own, and what's there may be cleaned up whenever nothing has it open. ",
+            $keep,
+            "To try something on a copy of a big folder you already have (a build, a checkout), clone it (cp -cR on macOS, cp -R --reflink=auto on Linux) rather than building a fresh one for each try: a clone takes no space until its files change.\n\nWhen rush itself did something odd (a message held, a restart, an agent woken or stopped), `rush why $RUSH_SESSION` and `rush events -h` say what it did and why."
+        )
+    };
+}
+
 /// What every agent rush runs is told, watched or not: where scratch files
 /// go, where what's worth keeping goes, and how to ask rush what it did.
-pub const SCRATCH_PROMPT: &str = "Put scratch files (clones, downloads, builds, caches) in $TMPDIR, never /tmp or elsewhere outside the project: $TMPDIR is this session's own, and what's there may be cleaned up whenever nothing has it open. Put what you or the user may want to look at again (screenshots, outputs, logs, reports, bench results) in $RUSH_KEEP: it stays after the session is done, for 30 days after it was last touched. To try something on a copy of a big folder you already have (a build, a checkout), clone it (cp -cR on macOS, cp -R --reflink=auto on Linux) rather than building a fresh one for each try: a clone takes no space until its files change.\n\nWhen rush itself did something odd (a message held, a restart, an agent woken or stopped), `rush why $RUSH_SESSION` and `rush events -h` say what it did and why.";
+pub const SCRATCH_PROMPT: &str = scratch_prompt!(
+    "Put what you or the user may want to look at again (screenshots, outputs, logs, reports, bench results) in $RUSH_KEEP: it stays after the session is done, for 30 days after it was last touched. "
+);
+
+/// The scratch prompt of a session with no kept folder: one run through a
+/// program of its own, which starts its agent where $RUSH_KEEP isn't set
+/// and its folder can't be reached.
+pub const SCRATCH_PROMPT_UNKEPT: &str = scratch_prompt!("");
 
 /// Tells a watched agent that a shell block in its reply is a box the user
 /// can run in place, so it hands them commands that way, and that a block
@@ -1614,16 +1633,21 @@ impl Host {
             &rush_state::Store::load().config.cheap_subagents,
             &st.cfg.kind,
         );
-        let keep = crate::keep::place_keep(&st.cfg.id, &st.cfg.cwd);
         let mut env = vec![
             // Ending in "/", as macOS's own: "$TMPDIR$name" stays inside.
             format!(
                 "TMPDIR={}",
                 rush_core::adapter::tmpdir_env(&tmp.to_string_lossy())
             ),
-            format!("RUSH_KEEP={}", keep.to_string_lossy()),
             rush_events::env(&ev),
         ];
+        // A program of its own (a client's wrapper) starts the agent with a
+        // cleared environment, in a sandbox that can't reach the kept
+        // folders: it gets none rather than one it can't use.
+        if c.binary.is_empty() {
+            let keep = crate::keep::place_keep(&st.cfg.id, &st.cfg.cwd);
+            env.insert(1, format!("RUSH_KEEP={}", keep.to_string_lossy()));
+        }
         env.extend(crate::shim::shim_env(&self.reg, &c.id, &c.kind));
         env.extend(c.env.iter().cloned());
         let mut o = StartOptions {
@@ -1773,9 +1797,14 @@ impl Host {
             FORMAT_PROMPT
         };
         let note = crate::workspace::workspace_note(c.workspace.as_ref());
+        let scratch = if c.binary.is_empty() {
+            SCRATCH_PROMPT
+        } else {
+            SCRATCH_PROMPT_UNKEPT
+        };
         o.prompt = system_prompt(&[
             tasks,
-            SCRATCH_PROMPT,
+            scratch,
             decisions,
             shell,
             format,
@@ -1791,7 +1820,7 @@ impl Host {
         // The same parts by name, so the next start can say what changed.
         let mut parts: Vec<(String, &str)> = vec![
             ("rush's task list".into(), tasks),
-            ("rush's scratch folder".into(), SCRATCH_PROMPT),
+            ("rush's scratch folder".into(), scratch),
             ("rush's decisions".into(), decisions),
             ("rush's shell boxes".into(), shell),
             ("rush's formatting".into(), format),
