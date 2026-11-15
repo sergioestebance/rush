@@ -955,6 +955,58 @@ fn the_sessions_stream_starts_with_the_list() {
     assert!(got.contains("\"alive\":false"), "{got}");
 }
 
+// The fork's server.go:1062 and :910: a session's slash commands reach its
+// stream, live from its host and, for a stopped host, from its saved list.
+#[test]
+fn slash_commands_reach_the_stream() {
+    use crate::server::wire_line;
+    assert_eq!(
+        String::from_utf8(
+            wire_line(br#"{"commands":[{"name":"review","description":"Review a PR","argumentHint":"<pr>"}],"type":"agtop_commands"}"#)
+                .unwrap()
+        )
+        .unwrap(),
+        // As Go's event.Marshal writes it.
+        r#"{"t":"commands","e":{"List":[{"Name":"review","Description":"Review a PR","ArgumentHint":"<pr>","Aliases":null}]}}"#
+    );
+    let _h = home();
+    let s = server(vec![]);
+    let dir = rush_host::dir("f6f6f6f6");
+    std::fs::create_dir_all(&dir).unwrap();
+    let info = Info {
+        id: "f6f6f6f6".into(),
+        state: "stopped".into(),
+        updated_at: Time::now(),
+        ..Info::default()
+    };
+    std::fs::write(dir.join("info.json"), serde_json::to_vec(&info).unwrap()).unwrap();
+    std::fs::write(
+        dir.join("commands.json"),
+        r#"[{"Name":"review","Description":"Review a PR","ArgumentHint":"<pr>","Aliases":null}]"#,
+    )
+    .unwrap();
+    let r = call(
+        &s,
+        "GET",
+        "/api/sessions/f6f6f6f6/events",
+        "",
+        &[("Authorization", &bearer(TOKEN))],
+    );
+    let got = stream(r, 4);
+    let types: Vec<String> = got
+        .split("\n\n")
+        .filter_map(|f| f.strip_prefix("data: "))
+        .map(|f| {
+            serde_json::from_str::<Value>(f).unwrap()["t"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(types, ["reset", "info", "commands", "synced"], "{got}");
+    assert!(got.contains(r#""Name":"review""#), "{got}");
+}
+
 #[test]
 fn a_hosts_lines_as_the_web_app_reads_them() {
     use crate::server::wire_line;

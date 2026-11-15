@@ -27,6 +27,7 @@ pub mod away;
 pub mod cheap;
 pub mod cli;
 pub mod client;
+pub mod commands;
 pub mod decisions;
 pub mod emeritus;
 pub mod events;

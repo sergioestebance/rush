@@ -11,8 +11,9 @@
 //! pump :602, wireLine :631, sendHistory :677, readJSONMost :719, clip
 //! :731, writeJSON :738, fail :744, Run :754), pair.go's handler and
 //! reachedAt (:100, :120), devices.go's handlers (:200, :209) and watch.go's
-//! push handlers (:15, :23). From the fork: remove (server.go:792) and the
-//! synced frames (server.go:918, :1016; resume.go:171).
+//! push handlers (:15, :23). From the fork: remove (server.go:792), the
+//! synced frames (server.go:918, :1016; resume.go:171) and the commands
+//! frames (server.go:910, :1062).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
@@ -880,6 +881,13 @@ impl Server {
                             Catchup::Whole => {
                                 send(w, "reset", &Value::Null);
                                 send(w, "info", &info_v);
+                                // Its slash commands, as its agent last listed them.
+                                if let Some(list) = rush_host::commands::read_commands(&id)
+                                    && let Ok(b) =
+                                        event::marshal(&Event::Commands(event::Commands { list }))
+                                {
+                                    sse(w, Some(b.as_bytes()));
+                                }
                                 send_history(&reg, &info, Time::default(), full, &mut |b| {
                                     sse(w, Some(&b));
                                 });
@@ -1354,6 +1362,11 @@ pub fn wire_line(l: &[u8]) -> Option<Vec<u8>> {
             }),
         ),
         Line::Stamp(t) => ("stamp", json!({ "At": t })),
+        Line::Commands(list) => {
+            return event::marshal(&Event::Commands(event::Commands { list }))
+                .ok()
+                .map(String::into_bytes);
+        }
         _ => return None,
     };
     Some(tagged(t, &e))
