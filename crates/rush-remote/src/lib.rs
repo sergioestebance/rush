@@ -24,6 +24,7 @@ pub mod others;
 pub mod pair;
 pub mod plugins;
 pub mod push;
+mod resume;
 pub mod server;
 pub mod service;
 pub mod sshd;
@@ -37,6 +38,8 @@ pub use ctx::Ctx;
 pub use plugins::{PLUGIN_CLOUDFLARED, PLUGIN_REMOTE, PLUGIN_SSH, PLUGIN_TAILSCALE};
 pub use server::{Server, Session, StartRequest};
 
+#[cfg(test)]
+mod tests_resume;
 #[cfg(test)]
 mod tests_server;
 #[cfg(test)]
