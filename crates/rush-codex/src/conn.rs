@@ -5,7 +5,8 @@
 //! Send, Interrupt, SetModel, SetEffort, SetMode, Answer, AnswerQuestion,
 //! Close, carried, envNames), handle.go:1-388 (handle, notification,
 //! request, the items), kids.go:1-181 (spawned threads as tasks) and
-//! shells.go:1-84 (commands gone to the background).
+//! shells.go:1-84 (commands gone to the background). From the fork: the
+//! caller's MCP servers at thread/start (conn.go:172-190).
 //!
 //! Go's Conn queues events for a channel a goroutine pumps; here the sink
 //! never blocks, so the reader pushes each in order as it reads it.
@@ -1239,6 +1240,21 @@ impl Conn {
                     "tool_timeout_sec": 3600, "env_vars": env_names(&env), "tools": tools,
                 }),
             );
+        }
+        for m in &o.mcp {
+            // The caller's own servers; Codex starts them with a bare
+            // environment, so the session's is named to pass on, and each
+            // server's own goes over it. Args is always there, [] when it
+            // has none: Codex fails the whole thread on a null one
+            // (the fork's conn.go:172-190).
+            let mut env: Vec<String> = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+            env.extend(o.env.iter().cloned());
+            let mut srv =
+                json!({"command": m.command, "args": m.args, "env_vars": env_names(&env)});
+            if !m.env.is_empty() {
+                srv["env"] = json!(m.env);
+            }
+            config.insert(format!("mcp_servers.{}", m.name), srv);
         }
         params.insert("config".into(), Value::Object(config));
         if !o.skill_roots.is_empty() {
