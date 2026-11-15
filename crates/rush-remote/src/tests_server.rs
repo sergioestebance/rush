@@ -497,6 +497,11 @@ fn web_controls_reach_the_host() {
     );
     let cases: Vec<(&str, &str, Value)> = vec![
         (
+            "steer a queued one in",
+            r#"{"op":"queue_send","index":1,"was":"b","guide":true}"#,
+            serde_json::json!({"op":"queue_send","index":1,"was":"b","guide":true}),
+        ),
+        (
             "send",
             r#"{"op":"send","text":"hello"}"#,
             serde_json::json!({"op":"send","text":"hello"}),
@@ -532,9 +537,11 @@ fn web_controls_reach_the_host() {
             serde_json::json!({"op":"stop_task","id":"t1"}),
         ),
         (
+            // Send now cuts in, on a harness that steers too (the fork's
+            // host.go:1855); a client steers it in with guide.
             "queue send",
             r#"{"op":"queue_send","index":1,"was":"next"}"#,
-            serde_json::json!({"op":"queue_send","index":1,"was":"next"}),
+            serde_json::json!({"op":"queue_send","index":1,"was":"next","now":true}),
         ),
         (
             "continue at the reset",

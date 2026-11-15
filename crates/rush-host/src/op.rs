@@ -39,6 +39,7 @@ pub struct Op {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub effort: String,
+    /// send, queue_send: stop the turn under way for it, so it goes next.
     #[serde(skip_serializing_if = "zero")]
     pub now: bool,
     /// send: into the turn under way, not stopping it.

@@ -1163,6 +1163,12 @@ impl RemoteOp {
         o.effort = self.effort.clone();
         o.now = self.now;
         o.guide = self.guide;
+        // A remote client's send now of a queued message cuts into the
+        // turn, as it did on the fork's Go (host.go:1855), on a harness
+        // that steers too; guide is how it asks to steer it in instead.
+        if o.op == "queue_send" && !o.guide {
+            o.now = true;
+        }
         o.index = self.index;
         o.was = self.was.clone();
         o.to = self.to;
