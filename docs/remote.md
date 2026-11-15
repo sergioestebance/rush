@@ -17,6 +17,18 @@ server in front of those hosts. This is the simpler plan that replaced
   `127.0.0.1:7878` by default, and only ever runs work on its own machine.
   - `GET /api/sessions` lists sessions, like `rush session list`.
   - `POST /api/sessions` starts one, through `rush session start`'s own code.
+    On a serve run with programs folders (`--programs`), a start may also
+    name MCP servers of the client's own for the agent to run beside rush's,
+    by name: `"mcp": {"threads": {"command": "/abs/path", "args": [...],
+    "env": {"K": "V"}}}` (`args` and `env` optional). Each command must be a
+    program in one of those folders; at most 16 servers; a name is 1 to 64
+    of `A-Z a-z 0-9 _ -` and never `rush` or `rush-…` (rush's own tools and
+    its plugins'); no `RUSH_` variable. Anything else is a 403 naming why.
+    The servers are kept in the session's `config.json` (`mcp`), so every
+    later start of its agent has them. Claude Code gets them as an
+    `--mcp-config` file in the session's scratch folder (mode 0600, gone
+    with it), every tool of theirs trusted; Codex as
+    `mcp_servers.<name>` at its thread's start.
   - `GET /api/sessions/{id}/events` is a Server-Sent Events stream. A running
     host's lines are decoded and sent as neutral events (`{"t":…,"e":…}`),
     with the host's replay first. A host that isn't running sends its saved
