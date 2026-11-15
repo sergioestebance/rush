@@ -12,8 +12,10 @@
 //! :731, writeJSON :738, fail :744, Run :754), pair.go's handler and
 //! reachedAt (:100, :120), devices.go's handlers (:200, :209) and watch.go's
 //! push handlers (:15, :23). From the fork: remove (server.go:792), the
-//! synced frames (server.go:918, :1016; resume.go:171) and the commands
-//! frames (server.go:910, :1062).
+//! synced frames (server.go:918, :1016; resume.go:171), the commands
+//! frames (server.go:910, :1062), the history route (server.go:171) and a
+//! stream's tail of turns in place of its last events (server.go:915,
+//! :939; see resume.rs).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
@@ -23,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use rush_core::adapter::{Profile, Registry, Session as AgentSession, migrated};
+use rush_core::adapter::{AdapterRef, Profile, Registry, Session as AgentSession, migrated};
 use rush_core::event::{self, Event};
 use rush_core::wire::RawJson;
 use rush_host::{Away, Info};
@@ -38,6 +40,7 @@ use crate::expose::{Log, Up, expose, fields, say};
 use crate::http::{self, Request, Response};
 use crate::pair::{PairCodes, Pairing};
 use crate::push::{Notice, Push, Subscription};
+use crate::resume::send_file_tail;
 
 /// A new session as a remote client asks for it: what the web app's form
 /// offers, and nothing that reaches past the agent.
@@ -323,6 +326,9 @@ impl Server {
             }
             ["api", "sessions", id, "events"] if !id.is_empty() => {
                 allow(get, "GET, HEAD").unwrap_or_else(|| self.events(r, id))
+            }
+            ["api", "sessions", id, "history"] if !id.is_empty() => {
+                allow(get, "GET, HEAD").unwrap_or_else(|| crate::resume::history(&self.reg, r, id))
             }
             ["api", "sessions", id, "op"] if !id.is_empty() => {
                 allow(m == "POST", "POST").unwrap_or_else(|| self.op(r, id))
@@ -830,8 +836,9 @@ impl Server {
     /// own. A running host gives its replay then what happens; one that
     /// isn't running gives its saved transcript, and the stream picks the
     /// host up when something wakes it. Reading never wakes it. History
-    /// starts with the transcript's last HISTORY_MOST events, or with
-    /// ?full=1 all of it.
+    /// starts with the transcript's newest turns, a cut with a cursor for
+    /// the history route first when there are older ones, or with ?full=1
+    /// all of it.
     fn events(&self, r: &Request, id: &str) -> Response {
         if !valid_id(id) {
             return fail(404, "no such session");
@@ -857,10 +864,15 @@ impl Server {
                     if rush_host::alive(info.host_pid) {
                         if let Ok(c) = rush_host::Client::dial(&id) {
                             send(w, "reset", &Value::Null);
-                            if !info.replay_from.is_zero() {
-                                send_history(&reg, &info, info.replay_from, full, &mut |b| {
-                                    sse(w, Some(&b));
-                                });
+                            let mut emit = |b: Vec<u8>| {
+                                sse(w, Some(&b));
+                            };
+                            if info.replay_from.is_zero() {
+                                // The ring holds the whole conversation.
+                            } else if full {
+                                send_history(&reg, &info, info.replay_from, full, &mut emit);
+                            } else {
+                                send_file_tail(&reg, &info, info.replay_from, &mut emit);
                             }
                             let ok = pump(&ctx, &c, w, !full);
                             c.close();
@@ -888,9 +900,14 @@ impl Server {
                                 {
                                     sse(w, Some(b.as_bytes()));
                                 }
-                                send_history(&reg, &info, Time::default(), full, &mut |b| {
+                                let mut emit = |b: Vec<u8>| {
                                     sse(w, Some(&b));
-                                });
+                                };
+                                if full {
+                                    send_history(&reg, &info, Time::default(), full, &mut emit);
+                                } else {
+                                    send_file_tail(&reg, &info, Time::default(), &mut emit);
+                                }
                                 if !full && !sse(w, Some(&synced_frame())) {
                                     return;
                                 }
@@ -1066,7 +1083,7 @@ pub(crate) fn under(p: &Path, root: &Path) -> bool {
 }
 
 /// A session id with a session folder behind it.
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     if id.is_empty() || id.contains(['/', '\\', '.']) {
         return false;
     }
@@ -1387,25 +1404,8 @@ pub fn send_history(
     full: bool,
     emit: &mut dyn FnMut(Vec<u8>),
 ) {
-    let kind = migrated(&info.kind);
-    let Some(a) = reg.get(kind.as_str()) else {
+    let Some((a, s)) = agent_session(reg, info) else {
         return;
-    };
-    let mut p = Profile {
-        kind: kind.clone(),
-        ..Profile::default()
-    };
-    if let Ok(cfg) = rush_host::read_config(&info.id) {
-        p.dir = cfg.account.dir;
-    }
-    let transcript = reg.find_transcript(kind.as_str(), &p, &info.cwd, &info.session_id);
-    let s = AgentSession {
-        id: info.session_id.clone(),
-        name: info.name.clone(),
-        cwd: info.cwd.clone(),
-        profile: p,
-        transcript,
-        ..AgentSession::default()
     };
     const TAIL_BYTES: i64 = 4 << 20;
     let most = if full { FULL_MOST } else { HISTORY_MOST };
@@ -1468,6 +1468,31 @@ pub fn send_history(
             emit(b.into_bytes());
         }
     }
+}
+
+/// The agent of a session's host, and the session as it reads its
+/// transcript: in the account's home the host's config names, at the
+/// transcript found for it. None when this rush doesn't know the agent.
+pub(crate) fn agent_session(reg: &Registry, info: &Info) -> Option<(AdapterRef, AgentSession)> {
+    let kind = migrated(&info.kind);
+    let a = reg.get(kind.as_str())?;
+    let mut p = Profile {
+        kind: kind.clone(),
+        ..Profile::default()
+    };
+    if let Ok(cfg) = rush_host::read_config(&info.id) {
+        p.dir = cfg.account.dir;
+    }
+    let transcript = reg.find_transcript(kind.as_str(), &p, &info.cwd, &info.session_id);
+    let s = AgentSession {
+        id: info.session_id.clone(),
+        name: info.name.clone(),
+        cwd: info.cwd.clone(),
+        profile: p,
+        transcript,
+        ..AgentSession::default()
+    };
+    Some((a, s))
 }
 
 /// Reads the body as JSON, at most most bytes.

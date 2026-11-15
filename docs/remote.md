@@ -21,9 +21,15 @@ server in front of those hosts. This is the simpler plan that replaced
     host's lines are decoded and sent as neutral events (`{"t":…,"e":…}`),
     with the host's replay first. A host that isn't running sends its saved
     transcript tail instead. Reading never wakes a sleeping host. History
-    starts with the transcript's last 600 events (a `cut` event says there's
-    more); `?full=1` sends all of it (up to 50,000), which the web app's
-    *Show earlier* and `rush remote attach` ask for.
+    starts with the transcript's newest 10 turns (at most 300 frames and
+    1 MiB, a bigger turn its newest part); when there's more, a `cut` frame
+    comes first, `{"t":"cut","e":{"before":"<unix ms>.<turns>[.<events>]"}}`.
+    `?full=1` sends all of it (up to 50,000 events), which the bundled web
+    app's *Show earlier* and `rush remote attach` ask for.
+  - `GET /api/sessions/{id}/history?before=<cursor>` takes a `cut`'s cursor
+    back: the 10 turns before it, oldest first, then a `cut` with the next
+    cursor when there are more, and the response ends. A bad cursor is a
+    400.
   - `POST /api/sessions/{id}/op` sends one host op from an allowlist: send,
     allow/deny, interrupt, stop, model/effort/mode, stop_task, background,
     queue ops, away/back, limit (carry on at the reset or not), context,
