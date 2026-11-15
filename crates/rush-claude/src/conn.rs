@@ -2,7 +2,7 @@
 //! internal/adapters/claude/conn.go (Start with leanEnv at :105, relayOnly, conn and its parts,
 //! RunsSession), claude/carry.go (WriteCarried) and native.go's Neutral.
 //! From the fork: the caller's MCP servers (conn.go:172-173, :211-269,
-//! :316-321, :349).
+//! :316-321, :349) and taking them live (SetMCP, :271-312).
 //!
 //! Go's conn reads the session's events on a goroutine of its own and hands
 //! them out on a channel. Here the session's reader thread calls the
@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use rush_core::adapter::{
     self, Adopter, Answerer, Asker, Backgrounder, CacheKeeper, Conn, ContextReader, Driver, Hearer,
-    Homed, Input, McpServer, Orphans, Responder, Sink, StartOptions, SubagentKeeper, TaskStopper,
-    ToolServer,
+    Homed, Input, McpServer, McpSetter, Orphans, Responder, Sink, StartOptions, SubagentKeeper,
+    TaskStopper, ToolServer,
 };
 use rush_core::agent::PreviewLine;
 use rush_core::event::{self, Event};
@@ -84,6 +84,10 @@ pub fn context_hooks(hooks: &mut Map<String, Value>, command: &str) {
 /// How long a control request is waited on: Go's callers give it a minute
 /// at most (host.go:1723).
 const ASK_WITHIN: Duration = Duration::from_secs(60);
+
+/// How long Claude Code has to start a live set of MCP servers (the fork's
+/// conn.go:292).
+const MCP_WITHIN: Duration = Duration::from_secs(30);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -815,6 +819,15 @@ impl Inner {
         &self,
         send: impl FnOnce() -> adapter::Result<String>,
     ) -> adapter::Result<ControlReply> {
+        self.wait_on_within(ASK_WITHIN, send)
+    }
+
+    /// wait_on, waiting at most within.
+    fn wait_on_within(
+        &self,
+        within: Duration,
+        send: impl FnOnce() -> adapter::Result<String>,
+    ) -> adapter::Result<ControlReply> {
         let (tx, rx) = mpsc::channel();
         let id = {
             // Held while sending, so the reply can't be read before it's
@@ -827,7 +840,7 @@ impl Inner {
             w.insert(id.clone(), tx);
             id
         };
-        match rx.recv_timeout(ASK_WITHIN) {
+        match rx.recv_timeout(within) {
             Ok(r) if !r.error.is_empty() => Err(err(r.error)),
             Ok(r) => Ok(r),
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -917,6 +930,9 @@ impl Conn for ClaudeConn {
         Some(self)
     }
     fn upgrader(&self) -> Option<&dyn adapter::Upgrader> {
+        Some(self)
+    }
+    fn mcp_setter(&self) -> Option<&dyn McpSetter> {
         Some(self)
     }
 
@@ -1011,6 +1027,59 @@ impl Answerer for ClaudeConn {
             .collect();
         let input = r.answer_input(&qs, &joined);
         self.0.s.allow(&r, Some(&input), false)
+    }
+}
+
+impl McpSetter for ClaudeConn {
+    /// Gives the running Claude Code the caller's MCP servers with the
+    /// mcp_set_servers control request, which takes hold at once, mid-turn
+    /// too. The request replaces every server rush gave it: the ones
+    /// --mcp-config named, so servers is the whole set, and rush's own
+    /// in-process ones (initialize's sdkMcpServers), so each goes as an
+    /// sdk entry. Their tools are trusted from now on, though
+    /// --allowedTools, fixed at the start, never named them. A server
+    /// Claude Code can't start, or one of rush's it still drops, is an
+    /// error, and the set it had is kept (the fork's conn.go:271-312).
+    fn set_mcp(&self, servers: &[McpServer]) -> adapter::Result<()> {
+        let c = &self.0;
+        let was = std::mem::replace(&mut *lock(&c.mcp), servers.to_vec());
+        let mut all = Map::new();
+        for (name, srv) in mcp_config(servers) {
+            all.insert(name.into(), serde_json::to_value(srv)?);
+        }
+        for t in &c.tools {
+            all.insert(t.name.clone(), json!({"type": "sdk", "name": t.name}));
+        }
+        let req = json!({"subtype": "mcp_set_servers", "servers": all}).to_string();
+        let r = c
+            .wait_on_within(MCP_WITHIN, || c.s.ask(&req))
+            .and_then(|reply| {
+                let body = reply.body.as_ref().map_or("null", |b| b.get());
+                #[derive(serde::Deserialize, Default)]
+                #[serde(default)]
+                struct Res {
+                    #[serde(deserialize_with = "rush_core::wire::nullvec::deserialize")]
+                    removed: Vec<String>,
+                    errors: Option<Map<String, Value>>,
+                }
+                let Ok(res) = serde_json::from_str::<Res>(body) else {
+                    return Ok(());
+                };
+                let own = res
+                    .removed
+                    .iter()
+                    .any(|n| c.tools.iter().any(|t| &t.name == n));
+                if res.errors.is_some_and(|e| !e.is_empty()) || own {
+                    return Err(err(format!(
+                        "Claude Code did not take the MCP servers: {body}"
+                    )));
+                }
+                Ok(())
+            });
+        if r.is_err() {
+            *lock(&c.mcp) = was;
+        }
+        r
     }
 }
 

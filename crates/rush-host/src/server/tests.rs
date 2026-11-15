@@ -2842,3 +2842,296 @@ fn real_hooks_wait_as_config_says() {
         (ROOT_IDLE, SPAWNED_IDLE)
     );
 }
+
+/// Servers named by name=command pairs.
+fn mcp_servers(pairs: &[(&str, &str)]) -> Vec<rush_core::adapter::McpServer> {
+    pairs
+        .iter()
+        .map(|(n, c)| rush_core::adapter::McpServer {
+            name: (*n).into(),
+            command: (*c).into(),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn mcp_op(pairs: &[(&str, &str)]) -> Op {
+    op("mcp", |o| o.mcp = mcp_servers(pairs))
+}
+
+/// What a set runs as the agent waits on it: a test's look at the host
+/// meanwhile.
+type During = Box<dyn FnOnce() + Send>;
+
+/// A conn that takes its caller's MCP servers live, or refuses them, each
+/// set it took kept as name=command pairs (the fork's mcp_test.go,
+/// liveMCPConn).
+#[derive(Default)]
+struct LiveMcp {
+    refuse: std::sync::atomic::AtomicBool,
+    sets: Mutex<Vec<String>>,
+    during: Mutex<Option<During>>,
+}
+
+impl rush_core::adapter::McpSetter for LiveMcp {
+    fn set_mcp(&self, servers: &[rush_core::adapter::McpServer]) -> adapter::Result<()> {
+        let during = self.during.lock().unwrap().take();
+        if let Some(f) = during {
+            f();
+        }
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err("the server did not start".into());
+        }
+        self.sets
+            .lock()
+            .unwrap()
+            .push(crate::fake::mcp_line(servers));
+        Ok(())
+    }
+}
+
+impl Conn for LiveMcp {
+    fn send(&self, _: Input) -> adapter::Result<()> {
+        Ok(())
+    }
+    fn answer(&self, _: &str, _: &str) -> adapter::Result<()> {
+        Ok(())
+    }
+    fn interrupt(&self) -> adapter::Result<()> {
+        Ok(())
+    }
+    fn set_model(&self, _: &str) -> adapter::Result<()> {
+        Ok(())
+    }
+    fn set_mode(&self, _: &str) -> adapter::Result<()> {
+        Ok(())
+    }
+    fn close(&self) -> adapter::Result<()> {
+        Ok(())
+    }
+    fn mcp_setter(&self) -> Option<&dyn rush_core::adapter::McpSetter> {
+        Some(self)
+    }
+}
+
+/// A host for session id running conn, in state.
+fn mcp_host(id: &str, conn: Arc<dyn Conn>, state: &str) -> Host {
+    let h = host(Config {
+        id: id.into(),
+        kind: "claude".into(),
+        ..Config::default()
+    });
+    with_conn(&h, conn);
+    h.lock().info.state = state.into();
+    h
+}
+
+// The fork's mcp_test.go:105 (TestMCPOpAddsServersToARunningAgentLive): an
+// mcp op gives a running agent that takes servers live the session's whole
+// set at once, with no restart. A name the session runs already keeps its
+// own server, and an op that adds nothing new asks nothing of the agent.
+// The session keeps the set.
+#[test]
+fn an_mcp_op_adds_servers_to_a_running_agent_live() {
+    let _home = Home::new();
+    let live = Arc::new(LiveMcp::default());
+    let h = mcp_host("mcplive1", live.clone(), "idle");
+    h.do_op(mcp_op(&[("threads", "/run/threads")])).unwrap();
+    h.do_op(mcp_op(&[
+        ("threads", "/run/other"),
+        ("notes", "/run/notes"),
+    ]))
+    .unwrap();
+    h.do_op(mcp_op(&[("threads", "/run/other")])).unwrap();
+    assert_eq!(
+        *live.sets.lock().unwrap(),
+        [
+            "threads=/run/threads",
+            "notes=/run/notes threads=/run/threads"
+        ]
+    );
+    assert!(h.lock().conn.is_some(), "restarted");
+    let saved = crate::client::read_config("mcplive1").unwrap();
+    assert_eq!(
+        crate::fake::mcp_line(&saved.mcp),
+        "notes=/run/notes threads=/run/threads"
+    );
+}
+
+// The fork's mcp_test.go:140 (TestMCPOpRestartsAnIdleAgentThatCannotTakeThemLive)
+// and host.go:1918-1960: an agent that can't take servers live gets them
+// when one next starts, right away when idle; a busy one (Codex mid-turn)
+// runs on, and the op is taken all the same. The session keeps them.
+#[test]
+fn an_mcp_op_restarts_an_idle_agent_that_cannot_take_them_live() {
+    let _home = Home::new();
+    for (id, state, running) in [("mcpidle1", "idle", false), ("mcpbusy1", "working", true)] {
+        let h = mcp_host(id, Arc::new(Kept::default()), state);
+        h.do_op(mcp_op(&[("threads", "/run/threads")])).unwrap();
+        assert_eq!(h.lock().conn.is_some(), running, "{id}: running after");
+        let saved = crate::client::read_config(id).unwrap();
+        assert_eq!(
+            crate::fake::mcp_line(&saved.mcp),
+            "threads=/run/threads",
+            "{id}"
+        );
+    }
+}
+
+// The fork's mcp_test.go:154 (TestMCPOpThatABusyAgentRefusesAnswersAnErrorAndIsTriedAgain):
+// a live add a busy agent refuses fails with its reason, so the caller can
+// try again; the next op naming the same server hands the agent the set
+// again, though the session keeps it already. Nothing restarts.
+#[test]
+fn an_mcp_op_a_busy_agent_refuses_fails_and_is_tried_again() {
+    let _home = Home::new();
+    let live = Arc::new(LiveMcp::default());
+    live.refuse.store(true, Ordering::SeqCst);
+    let h = mcp_host("mcpref1", live.clone(), "working");
+    let e = h.do_op(mcp_op(&[("threads", "/run/threads")])).unwrap_err();
+    assert_eq!(
+        e,
+        "the agent did not take the MCP servers: the server did not start"
+    );
+    live.refuse.store(false, Ordering::SeqCst);
+    h.do_op(mcp_op(&[("threads", "/run/threads")])).unwrap();
+    assert_eq!(*live.sets.lock().unwrap(), ["threads=/run/threads"]);
+    assert!(h.lock().conn.is_some(), "restarted");
+}
+
+// The fork's mcp_test.go:189 (TestMCPOpsAtOnceNeverAnswerTakenWhileALiveAddFails):
+// mcp ops run one after another, each to its end: one sent while another's
+// live add is under way waits for it, then finds the agent refused the
+// server and hands it again itself, so neither says the agent has it.
+#[test]
+fn mcp_ops_at_once_never_answer_taken_while_a_live_add_fails() {
+    let _home = Home::new();
+    let live = Arc::new(LiveMcp::default());
+    live.refuse.store(true, Ordering::SeqCst);
+    let h = mcp_host("mcpboth1", live.clone(), "working");
+    let (tx, second) = std::sync::mpsc::channel();
+    let h2 = h.clone();
+    *live.during.lock().unwrap() = Some(Box::new(move || {
+        assert!(
+            h2.mcp_ops.try_lock().is_err(),
+            "a live add runs outside the mcp ops' turn"
+        );
+        std::thread::spawn(move || {
+            let _ = tx.send(h2.do_op(mcp_op(&[("threads", "/run/threads")])));
+        });
+    }));
+    assert!(
+        h.do_op(mcp_op(&[("threads", "/run/threads")])).is_err(),
+        "the first op answered taken while the agent refused the server"
+    );
+    let r = second
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the second op's answer");
+    assert!(
+        r.is_err(),
+        "the second op answered taken while the agent refused the server"
+    );
+}
+
+// host.go:1928: a session runs at most 16 MCP servers of its caller's; an
+// op that would take it past them changes nothing.
+#[test]
+fn an_mcp_op_past_sixteen_servers_fails() {
+    let _home = Home::new();
+    let names: Vec<String> = (0..16).map(|i| format!("s{i:02}")).collect();
+    let pairs: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "/run/s")).collect();
+    let h = host(Config {
+        id: "mcpmany1".into(),
+        kind: "claude".into(),
+        mcp: mcp_servers(&pairs),
+        ..Config::default()
+    });
+    let e = h.do_op(mcp_op(&[("threads", "/run/threads")])).unwrap_err();
+    assert_eq!(e, "a session runs at most 16 MCP servers of its caller's");
+    assert_eq!(h.lock().cfg.mcp.len(), 16);
+}
+
+// host.go:2342: an mcp op that names an id is answered on its own
+// connection with that id, its error or none, so serve can say how it went;
+// and the idle agent it restarted starts again with the servers
+// (mcp_test.go:140, over the socket).
+#[test]
+fn an_mcp_ops_answer_carries_its_id() {
+    let home = Home::new();
+    let hp = home.path();
+    let id = "mcpsock1";
+    std::fs::create_dir_all(dir(id)).unwrap();
+    let cfg = Config {
+        id: id.into(),
+        kind: "fake".into(),
+        cwd: hp.to_string_lossy().into_owned(),
+        account: Profile {
+            kind: Kind::from("fake"),
+            name: "fake".into(),
+            dir: hp.to_string_lossy().into_owned(),
+        },
+        prompt: "hi".into(),
+        ..Config::default()
+    };
+    std::fs::write(dir(id).join("config.json"), cfg.to_json_indent()).unwrap();
+    let hp2 = hp.clone();
+    let server = std::thread::spawn(move || {
+        Home::enter(&hp2);
+        run_with(registry(), Hooks::quiet(), id)
+    });
+    let w = rush_sys::fswait::Watcher::new();
+    w.watch(&[dir(id)]);
+    let c = loop {
+        if let Ok(c) = Client::dial(id) {
+            break c;
+        }
+        assert!(
+            w.wait(None, Some(Duration::from_secs(10))),
+            "the host never listened"
+        );
+    };
+    let Line::Event(Event::Approval(ap)) =
+        next(&c, |l| matches!(l, Line::Event(Event::Approval(_))))
+    else {
+        unreachable!()
+    };
+    c.allow(&ap.id, None, false).unwrap();
+    next(&c, in_state("idle"));
+    let names: Vec<String> = (0..16).map(|i| format!("s{i:02}")).collect();
+    let many: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "/run/s")).collect();
+    for (rid, pairs, want) in [
+        ("r1", vec![("threads", "/run/threads")], ""),
+        (
+            "r2",
+            many,
+            "a session runs at most 16 MCP servers of its caller's",
+        ),
+    ] {
+        let mut o = mcp_op(&pairs);
+        o.id = rid.into();
+        c.send_op(o).unwrap();
+        let Line::Reply { error, .. } =
+            next(&c, |l| matches!(l, Line::Reply { id, .. } if id == rid))
+        else {
+            unreachable!()
+        };
+        assert_eq!(error, want, "{rid}");
+    }
+    c.send("again").unwrap();
+    let log = hp.join("starts.log");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let lines = || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    while lines().len() < 2 {
+        assert!(std::time::Instant::now() < deadline, "{:?}", lines());
+        w.wait(None, Some(Duration::from_millis(50)));
+    }
+    assert_eq!(lines()[1], "start fake-session mcp=threads=/run/threads");
+    c.stop().unwrap();
+    join_within(server, Duration::from_secs(20)).unwrap();
+}

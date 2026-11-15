@@ -9,7 +9,8 @@
 //! stale.go:13-41 (BinStamp, Stale, Quiet, RestartDue), away.go:28-54
 //! (Away, Held), left.go:17-21 (Left), workspace.go:12-28 (Workspace),
 //! revive.go:23 (midTurn) and exchange.go (queueExchanges, trimExchanges).
-//! From the fork: host.go:63 (Config.MCP).
+//! From the fork: host.go:63 (Config.MCP), :263-269 (Proto 13, MCPFrom),
+//! :620 (withMCP) and stale.go:93-99 (TakesMCP, AddsMCP).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -29,9 +30,31 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Claude Code's sessions as rush's own events too, to a client that says
 /// it reads them, 7 steering with a queued message (queue_send's guide),
 /// 8 exchanges, 9 guarded compaction, 10 idle host sleep, 11 away, 12
-/// keeping the prompt cache warm (the keep_warm op, Info.cache_ttl). A
-/// client sends its build's in the hello.
-pub const PROTO: i64 = 12;
+/// keeping the prompt cache warm (the keep_warm op, Info.cache_ttl), 13
+/// the mcp op, answered with its id (the fork's). A client sends its
+/// build's in the hello.
+pub const PROTO: i64 = 13;
+
+/// The first PROTO whose host takes an mcp op live and answers it (the
+/// fork's host.go:269): one from before gets a caller's MCP servers only
+/// by a restart on this one (restart_with_mcp).
+pub const MCP_FROM: i64 = 13;
+
+/// have with the servers of add it doesn't name yet, in name order, and
+/// whether any was added. A name have runs keeps its own server (the
+/// fork's host.go:620, withMCP).
+pub fn with_mcp(have: &[McpServer], add: &[McpServer]) -> (Vec<McpServer>, bool) {
+    let mut out = have.to_vec();
+    let mut added = false;
+    for m in add {
+        if !out.iter().any(|h| h.name == m.name) {
+            out.push(m.clone());
+            added = true;
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    (out, added)
+}
 
 /// How many left paths an agent remembers.
 pub const MAX_BRANCHES: usize = 30;
@@ -246,6 +269,12 @@ impl Emeritus {
 }
 
 impl Config {
+    /// Whether servers name one the session doesn't run yet (the fork's
+    /// stale.go:96, AddsMCP).
+    pub fn adds_mcp(&self, servers: &[McpServer]) -> bool {
+        with_mcp(&self.mcp, servers).1
+    }
+
     /// Whether the session is retired for good (docs/emeritus.md).
     pub fn retired(&self) -> bool {
         self.emeritus.as_ref().is_some_and(Emeritus::retired)
@@ -754,6 +783,12 @@ mod images_list {
 }
 
 impl Info {
+    /// Whether the host takes an mcp op live: one from before MCP_FROM
+    /// never answers it (the fork's stale.go:93, TakesMCP).
+    pub fn takes_mcp(&self) -> bool {
+        self.proto >= MCP_FROM
+    }
+
     /// Whether the session is another machine's, seen through rush remote
     /// attach.
     pub fn is_remote(&self) -> bool {

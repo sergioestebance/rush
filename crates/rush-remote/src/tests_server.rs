@@ -303,6 +303,20 @@ fn remote_ops_allowlist() {
         );
         assert_eq!(r.status, 403, "{op}");
     }
+    // mcp is one a remote client may send (the fork's server.go:621): one
+    // naming no servers is refused for that, not for its name.
+    assert!(crate::server::REMOTE_OPS.contains(&"mcp"));
+    let r = call(
+        &s,
+        "POST",
+        "/api/sessions/zz/op",
+        r#"{"op":"mcp"}"#,
+        &[
+            ("Authorization", &bearer(TOKEN)),
+            ("Content-Type", "application/json"),
+        ],
+    );
+    assert_eq!(r.status, 400, "mcp");
 }
 
 #[test]
@@ -333,9 +347,26 @@ fn allowed_cwd() {
 
 /// A session's host stands in: alive (this process), answering on the
 /// session's socket with its info, and handing over every op it's sent.
+/// An mcp op with an id it answers as mcp says (the fork's
+/// fakehost_test.go:105).
 struct FakeHost {
     info: Info,
     ops: Receiver<Vec<u8>>,
+    mcp: Arc<Mutex<McpAnswer>>,
+}
+
+/// How a fake host answers an mcp op.
+#[derive(Clone, Default)]
+enum McpAnswer {
+    /// Takes it.
+    #[default]
+    Take,
+    /// Says why it didn't.
+    Refuse(&'static str),
+    /// Never answers.
+    Silent,
+    /// Hangs up.
+    Gone,
 }
 
 fn fake_host(id: &str, name: &str, cwd: &str) -> FakeHost {
@@ -357,6 +388,8 @@ fn fake_host(id: &str, name: &str, cwd: &str) -> FakeHost {
     let ln = UnixListener::bind(rush_host::sock_path(id)).unwrap();
     let (tx, rx) = channel();
     let i2 = info.clone();
+    let mcp: Arc<Mutex<McpAnswer>> = Arc::default();
+    let m2 = mcp.clone();
     std::thread::spawn(move || {
         for c in ln.incoming() {
             let Ok(mut c) = c else { return };
@@ -365,20 +398,57 @@ fn fake_host(id: &str, name: &str, cwd: &str) -> FakeHost {
             l.extend_from_slice(b",\"type\":\"agtop_info\"}\n");
             let _ = c.write_all(&l);
             let tx = tx.clone();
+            let m2 = m2.clone();
             std::thread::spawn(move || {
+                let mut w = c.try_clone().unwrap();
                 for line in BufReader::new(c).split(b'\n').map_while(Result::ok) {
                     let v: Value = serde_json::from_slice(&line).unwrap_or(Value::Null);
-                    if v["op"] != "hello" {
-                        let _ = tx.send(line);
+                    if v["op"] == "hello" {
+                        continue;
                     }
+                    let _ = tx.send(line);
+                    let Some(id) = v["id"].as_str().filter(|_| v["op"] == "mcp") else {
+                        continue;
+                    };
+                    let answer = m2.lock().unwrap().clone();
+                    let err = match answer {
+                        McpAnswer::Take => "",
+                        McpAnswer::Refuse(why) => why,
+                        McpAnswer::Silent => continue,
+                        McpAnswer::Gone => {
+                            let _ = w.shutdown(std::net::Shutdown::Both);
+                            return;
+                        }
+                    };
+                    let mut l = rush_host::lines::reply_line(id, None, err);
+                    l.push(b'\n');
+                    let _ = w.write_all(&l);
                 }
             });
         }
     });
-    FakeHost { info, ops: rx }
+    FakeHost { info, ops: rx, mcp }
 }
 
 impl FakeHost {
+    /// Says nothing reached it: what serve refuses never dials.
+    fn no_op(&self) {
+        if let Ok(l) = self.ops.try_recv() {
+            panic!("the host got {}", String::from_utf8_lossy(&l));
+        }
+    }
+
+    /// Writes its info with f's changes, as serve reads it.
+    fn set_info(&self, f: impl FnOnce(&mut Info)) {
+        let mut i = rush_host::read_info(&self.info.id).unwrap();
+        f(&mut i);
+        std::fs::write(
+            rush_host::dir(&self.info.id).join("info.json"),
+            serde_json::to_vec(&i).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn op(&self) -> Value {
         let l = self
             .ops
@@ -1445,4 +1515,241 @@ fn start_takes_mcp_servers_only_from_serve_folders() {
         );
         assert!(started.lock().unwrap().is_none(), "{name}: it started");
     }
+}
+
+/// A serve on this machine with programs folders progs, that waits wait
+/// for a host's answer to an mcp op.
+fn mcp_server(progs: Vec<std::path::PathBuf>, wait: Duration) -> Server {
+    let mut s = Server::new(
+        Config {
+            name: "box".into(),
+            ..Config::default()
+        },
+        TOKEN.into(),
+        rush_core::adapter::Registry::new(),
+    );
+    s.programs = progs;
+    s.mcp_wait = wait;
+    s
+}
+
+/// What an op answered: its status and its error, if any.
+fn op_answer(s: &Arc<Server>, body: &Value) -> (u16, String) {
+    let b = bearer(TOKEN);
+    let hdr = [
+        ("Authorization", b.as_str()),
+        ("Content-Type", "application/json"),
+    ];
+    let r = call(
+        s,
+        "POST",
+        "/api/sessions/feedbeef/op",
+        &body.to_string(),
+        &hdr,
+    );
+    let got: Value = serde_json::from_slice(r.bytes()).unwrap_or_default();
+    (r.status, got["error"].as_str().unwrap_or("").to_string())
+}
+
+// The fork's programs_test.go:159 (TestOpMCPOnlyFromServeFolders): an mcp
+// op adds MCP servers to a running session on the same terms as a start's.
+// The host gets them as a list in name order, each with its own
+// environment, under an id it answers: 202 once it took them, 502 with its
+// reason when it didn't, 502 when it went away and 504 when it never said
+// (server.go:548-570, awaitReply). An op that names no servers, or servers
+// on another op, is a 400.
+#[test]
+fn an_mcp_op_adds_servers_only_from_serve_folders() {
+    let _h = home();
+    let f = fake_host("feedbeef", "job", "/work");
+    let progs = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let prog = progs.path().join("threads-mcp");
+    let stray = other.path().join("threads-mcp");
+    program(&prog);
+    program(&stray);
+    let (p, st) = (prog.to_string_lossy(), stray.to_string_lossy());
+    let good = serde_json::json!({"op": "mcp", "mcp": {
+        "threads": {"command": p, "args": ["serve"], "env": {"TOOL_TOKEN": "tok"}},
+    }});
+
+    let s = Arc::new(mcp_server(vec![], Duration::from_secs(5)));
+    assert_eq!(
+        op_answer(&s, &good),
+        (
+            403,
+            "this serve runs only the agents' own programs, with their own environment".into()
+        ),
+        "no folders"
+    );
+    f.no_op();
+
+    let s = Arc::new(mcp_server(
+        vec![progs.path().to_path_buf()],
+        Duration::from_millis(300),
+    ));
+    assert_eq!(op_answer(&s, &good), (202, String::new()));
+    let mut got = f.op();
+    assert!(
+        got["op"] == "mcp" && got["id"].as_str().is_some_and(|id| id.len() == 16),
+        "the host got {got}, not an mcp op with an id to answer"
+    );
+    assert_eq!(
+        got["mcp"].take(),
+        serde_json::json!([{"name": "threads", "command": p, "args": ["serve"], "env": {"TOOL_TOKEN": "tok"}}])
+    );
+    // A client's own server, named without args: none reach the host.
+    let bare =
+        serde_json::json!({"op": "mcp", "mcp": {"threads": {"command": p, "env": {"K": "V"}}}});
+    assert_eq!(op_answer(&s, &bare), (202, String::new()));
+    assert_eq!(
+        f.op()["mcp"],
+        serde_json::json!([{"name": "threads", "command": p, "env": {"K": "V"}}])
+    );
+
+    for (answer, want) in [
+        (
+            McpAnswer::Refuse("the server did not start"),
+            (502, "the server did not start"),
+        ),
+        (McpAnswer::Gone, (502, "the session's host went away")),
+        (
+            McpAnswer::Silent,
+            (504, "the session's host did not answer"),
+        ),
+    ] {
+        *f.mcp.lock().unwrap() = answer;
+        let (code, err) = op_answer(&s, &good);
+        assert_eq!((code, err.as_str()), want);
+        assert_eq!(f.op()["op"], "mcp");
+    }
+    *f.mcp.lock().unwrap() = McpAnswer::Take;
+
+    let mut cases: Vec<(&str, Value, u16, String)> = unfit_mcp(&p, &st)
+        .into_iter()
+        .map(|(name, mcp, why)| (name, serde_json::json!({"op": "mcp", "mcp": mcp}), 403, why))
+        .collect();
+    let xor = "an mcp op, and only one, names MCP servers".to_string();
+    cases.extend([
+        (
+            "no server",
+            serde_json::json!({"op": "mcp"}),
+            400,
+            xor.clone(),
+        ),
+        (
+            "no servers",
+            serde_json::json!({"op": "mcp", "mcp": {}}),
+            400,
+            xor.clone(),
+        ),
+        (
+            "servers on a send",
+            serde_json::json!({"op": "send", "text": "hi", "mcp": mcp_of(&["x"], &p)}),
+            400,
+            xor,
+        ),
+    ]);
+    for (name, body, code, why) in cases {
+        assert_eq!(op_answer(&s, &body), (code, why), "{name}");
+        f.no_op();
+    }
+}
+
+// The fork's programs_test.go:231 (TestOpMCPRestartsAHostFromBeforeMCPOps):
+// a host from before mcp ops (Proto under 13) never answers one. Serve
+// doesn't send it the op: it restarts the host on this rush with the
+// servers, at once between turns (202), else once the turn has ended,
+// answering 409 at once so the caller tries again with its next op. A
+// host whose session runs every server named already is left as it is.
+#[test]
+fn an_mcp_op_restarts_a_host_from_before_mcp_ops() {
+    let _h = home();
+    let f = fake_host("feedbeef", "job", "/work");
+    let progs = tempfile::tempdir().unwrap();
+    let prog = progs.path().join("threads-mcp");
+    program(&prog);
+    let p = prog.to_string_lossy();
+    let (tx, restarts) = channel::<String>();
+    let tx = Mutex::new(tx);
+    let mut s = mcp_server(vec![progs.path().to_path_buf()], Duration::from_secs(5));
+    s.quiet_poll = Duration::from_millis(20);
+    s.restart_mcp = Some(Arc::new(
+        move |id: &str, servers: &[rush_core::adapter::McpServer]| {
+            let _ = tx
+                .lock()
+                .unwrap()
+                .send(format!("{id} {}", serde_json::to_string(servers).unwrap()));
+            Ok(())
+        },
+    ));
+    let s = Arc::new(s);
+    let good = serde_json::json!({"op": "mcp", "mcp": {
+        "threads": {"command": p, "env": {"TOOL_TOKEN": "tok"}},
+    }});
+    let want =
+        format!(r#"feedbeef [{{"name":"threads","command":"{p}","env":{{"TOOL_TOKEN":"tok"}}}}]"#);
+    let restarted = || {
+        restarts
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the host was not restarted")
+    };
+    let no_restart = |why: &str| {
+        if let Ok(r) = restarts.try_recv() {
+            panic!("{why}: restarted {r}");
+        }
+    };
+
+    // between turns: restarted at once, with the servers
+    f.set_info(|i| i.proto = rush_host::MCP_FROM - 1);
+    assert_eq!(op_answer(&s, &good), (202, String::new()), "between turns");
+    assert_eq!(restarted(), want);
+    f.no_op();
+
+    // mid-turn: 409 at once, restarted when the turn has ended
+    f.set_info(|i| i.state = "working".into());
+    assert_eq!(
+        op_answer(&s, &good),
+        (
+            409,
+            "the session's host is from before mcp ops: it is restarted with the servers when its turn has ended".into()
+        ),
+        "mid-turn"
+    );
+    no_restart("mid-turn");
+    f.set_info(|i| i.state = "idle".into());
+    assert_eq!(restarted(), want);
+    f.no_op();
+
+    // a session that runs the server already: 202 and nothing restarts,
+    // between turns or mid-turn
+    let cfg = rush_host::Config {
+        id: "feedbeef".into(),
+        mcp: vec![rush_core::adapter::McpServer {
+            name: "threads".into(),
+            command: p.to_string(),
+            ..Default::default()
+        }],
+        ..rush_host::Config::default()
+    };
+    std::fs::write(
+        rush_host::dir("feedbeef").join("config.json"),
+        cfg.to_json_indent(),
+    )
+    .unwrap();
+    for state in ["idle", "working"] {
+        f.set_info(|i| i.state = state.into());
+        assert_eq!(op_answer(&s, &good), (202, String::new()), "{state}");
+        no_restart(state);
+    }
+    f.no_op();
+
+    // a current host takes the op itself
+    f.set_info(|i| {
+        i.proto = rush_host::PROTO;
+        i.state = "idle".into();
+    });
+    assert_eq!(op_answer(&s, &good), (202, String::new()), "a current host");
+    assert_eq!(f.op()["op"], "mcp");
+    no_restart("a current host");
 }

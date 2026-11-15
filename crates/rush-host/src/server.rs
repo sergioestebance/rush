@@ -24,6 +24,8 @@
 //! check-ins while away, stall and stuck watching, decisions cards, the
 //! answers spawned agents report, the feed, plugins' tools) is part two of
 //! the port: each such point is marked "part two".
+//!
+//! From the fork: the mcp op (host.go:1747-1755, :1918-1960, :2342).
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufWriter, Write};
@@ -416,6 +418,10 @@ pub(crate) struct State {
     conn: Option<Arc<dyn Conn>>,
     conn_key: u64,
     next_key: u64,
+    /// The running agent's key when it refused the session's MCP servers
+    /// live, 0 for none: a later mcp op hands it them again (the fork's
+    /// mcpBehind).
+    mcp_behind: u64,
     options: HashMap<String, Vec<ApprovalOption>>,
     /// The conversation has a transcript to resume.
     began: bool,
@@ -526,6 +532,10 @@ pub(crate) struct Shared {
     tx: Mutex<Sender<Msg>>,
     /// Reaches the approved plugins' MCP servers.
     broker: Arc<rush_plugin::Broker>,
+    /// Runs the session's mcp ops one after another, each to its end: the
+    /// state's lock is let go during a live add, and a second op must not
+    /// answer before the first's add is known (the fork's mcpOps).
+    mcp_ops: Mutex<()>,
     me: Weak<Shared>,
 }
 
@@ -835,6 +845,7 @@ fn build(reg: Registry, hooks: Hooks, mut cfg: Config) -> (Host, Receiver<Msg>) 
         conn: None,
         conn_key: 0,
         next_key: 0,
+        mcp_behind: 0,
         options: HashMap::new(),
         began,
         untold: String::new(),
@@ -905,6 +916,7 @@ fn build(reg: Registry, hooks: Hooks, mut cfg: Config) -> (Host, Receiver<Msg>) 
         timers: Timers::start(),
         tx: Mutex::new(tx),
         broker: Arc::new(rush_plugin::Broker::new()),
+        mcp_ops: Mutex::new(()),
         me: me.clone(),
     });
     (Host(sh), rx)
@@ -3013,8 +3025,65 @@ impl Host {
 
     // ---- Ops ----
 
+    /// The mcp op: servers the session doesn't run yet join its own and
+    /// are kept with it. An agent that takes them live gets the whole set
+    /// at once, mid-turn too; any other when one next starts: right away
+    /// when idle. A busy agent that refuses them live runs on without
+    /// them, and the op fails with why, for the caller to try again: the
+    /// next op hands them to it again, though the session keeps them
+    /// already. Run in the mcp ops' turn (the fork's host.go:1918-1960).
+    fn add_mcp<'a>(
+        &'a self,
+        mut st: G<'a>,
+        conn: Option<Arc<dyn Conn>>,
+        add: &[rush_core::adapter::McpServer],
+    ) -> Result<(), String> {
+        let (servers, added) = crate::wire::with_mcp(&st.cfg.mcp, add);
+        let behind = conn.is_some() && st.mcp_behind != 0 && st.mcp_behind == st.conn_key;
+        if !added && !behind {
+            return Ok(());
+        }
+        if servers.len() > adapter::MCP_MOST {
+            return Err(format!(
+                "a session runs at most {} MCP servers of its caller's",
+                adapter::MCP_MOST
+            ));
+        }
+        st.cfg.mcp = servers.clone();
+        self.save_config(&st);
+        let mut refused = None;
+        if let Some(c) = &conn
+            && c.mcp_setter().is_some()
+        {
+            drop(st);
+            let r = c.mcp_setter().map_or(Ok(()), |m| m.set_mcp(&servers));
+            st = self.lock();
+            if r.is_ok() || !same_conn(&st.conn, &conn) {
+                st.mcp_behind = 0;
+                return Ok(()); // taken live, or a fresh agent started with them
+            }
+            refused = r.err();
+        }
+        if conn.is_some() && same_conn(&st.conn, &conn) && st.info.state == "idle" {
+            st.mcp_behind = 0;
+            let c = self.detach(&mut st);
+            self.publish(&mut st);
+            drop(st);
+            if let Some(c) = c {
+                stop_agent(&c);
+            }
+            return Ok(());
+        }
+        if let Some(e) = refused {
+            st.mcp_behind = st.conn_key;
+            return Err(format!("the agent did not take the MCP servers: {e}"));
+        }
+        Ok(())
+    }
+
     /// Carries out one op from a client.
     pub(crate) fn do_op(&self, o: Op) -> Result<(), String> {
+        let _turn = (o.op == "mcp").then(|| self.mcp_ops.lock().unwrap_or_else(|e| e.into_inner()));
         let r = self.do_op_inner(&o);
         if let Some(f) = op_fields(&o, r.as_ref().err().map(String::as_str)) {
             let st = self.lock();
@@ -3270,6 +3339,9 @@ impl Host {
                     }
                     return Ok(());
                 }
+            }
+            "mcp" => {
+                return self.add_mcp(st, conn, &o.mcp);
             }
             "effort" => {
                 // Effort is fixed for an agent's process, so it takes hold
@@ -4768,8 +4840,22 @@ impl Host {
                 continue;
             };
             let stop = o.op == "stop";
-            if let Err(e) = self.do_op(o) {
-                let b: Arc<[u8]> = lines::error_line(&e).into();
+            // An mcp op with an id is answered to this client alone, its
+            // error or none, for the one that waits on it (serve's mcp
+            // op; the fork's host.go:2342).
+            let reply = (o.op == "mcp" && !o.id.is_empty()).then(|| o.id.clone());
+            let r = self.do_op(o);
+            let answer = match (reply, r) {
+                (Some(id), r) => Some(lines::reply_line(
+                    &id,
+                    None,
+                    r.err().as_deref().unwrap_or(""),
+                )),
+                (None, Err(e)) => Some(lines::error_line(&e)),
+                (None, Ok(())) => None,
+            };
+            if let Some(b) = answer {
+                let b: Arc<[u8]> = b.into();
                 let mut st = self.lock();
                 if let Some(c) = st.clients.get(&cid)
                     && !c.push(&b)

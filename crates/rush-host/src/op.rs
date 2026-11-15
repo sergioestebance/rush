@@ -1,6 +1,8 @@
 //! One command from a client, a line of JSON on the socket: what Go's
-//! client.go writes and host.go:1840 (op) reads, field for field.
+//! client.go writes and host.go:1840 (op) reads, field for field; the
+//! fork's mcp (host.go:1747).
 
+use rush_core::adapter::McpServer;
 use rush_core::event::Exchange;
 use rush_core::wire::RawJson;
 use rush_state::Time;
@@ -72,6 +74,12 @@ pub struct Op {
         deserialize_with = "rush_core::wire::nullvec::deserialize"
     )]
     pub without: Vec<String>,
+    /// mcp: servers to add to the session's own (the fork's host.go:1747).
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "rush_core::wire::nullvec::deserialize"
+    )]
+    pub mcp: Vec<McpServer>,
     /// away: None comes back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub away: Option<Away>,

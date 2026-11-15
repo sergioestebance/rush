@@ -578,3 +578,100 @@ fn caller_mcp_servers_at_the_start() {
     }
     until("the config file gone", || !file.exists());
 }
+
+/// Answers mcp_set_servers as Claude Code does: a request that leaves out
+/// rush's own server t (an sdk entry) removes it, and a server that won't
+/// start is an error; then it asks to run the new server's tool.
+const SETS_SERVERS: &str = r#"read -r init; printf '%s\n' "$init" >> "$LOG"
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"rush-1","response":{"commands":[]}}}'
+while read -r line; do
+  printf '%s\n' "$line" >> "$LOG"
+  id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\(rush-[0-9]*\)".*/\1/p')
+  [ -n "$id" ] || continue
+  case "$line" in
+  *'"subtype":"mcp_set_servers"'*)
+    removed='[]'; errs='{}'
+    case "$line" in *'"t":{"name":"t","type":"sdk"}'*) ;; *) removed='["t"]' ;; esac
+    case "$line" in *'"broken":'*) errs='{"broken":"failed to start"}' ;; esac
+    echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{"added":["threads"],"removed":'$removed',"errors":'$errs'}}}'
+    echo '{"type":"control_request","request_id":"p-2","request":{"subtype":"can_use_tool","tool_name":"mcp__threads__reply","input":{},"tool_use_id":"tu-2"}}' ;;
+  *) echo '{"type":"control_response","response":{"subtype":"success","request_id":"'$id'","response":{}}}' ;;
+  esac
+done
+"#;
+
+// conn_test.go:188 (TestSetMCPGivesClaudeCodeTheServersLive): a caller's
+// MCP servers reach a running Claude Code as one mcp_set_servers request
+// with the whole set, each with its environment and its args ([] when it
+// has none), beside an sdk entry for each of rush's own servers, which the
+// request would otherwise remove. Every tool of theirs is trusted from
+// then on, though --allowedTools named none of them. A server Claude Code
+// can't start is an error.
+#[test]
+fn set_mcp_gives_claude_code_the_servers_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bin, log) = fake_claude(dir.path(), SETS_SERVERS);
+    let log = log.display().to_string();
+    let (tx, rx) = channel();
+    let conn = Claude::new()
+        .start(
+            StartOptions {
+                profile: crate::adapter::profile(&Account::at("x", dir.path().join("cfg"))),
+                binary: bin.display().to_string(),
+                temp_dir: dir.path().join("tmp").display().to_string(),
+                tools: vec![ToolServer {
+                    name: "t".into(),
+                    trusted: vec!["draw".into()],
+                    handle: Some(Arc::new(|_: &RawValue| {
+                        RawJson::new(r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#).unwrap()
+                    })),
+                    args: Vec::new(),
+                }],
+                mcp: vec![server("notes", "/run/notes")],
+                ..StartOptions::default()
+            },
+            Arc::new(Tagged { key: 4u8, tx }),
+        )
+        .unwrap();
+    let setter = conn.mcp_setter().expect("Claude Code takes servers live");
+    let servers = vec![
+        server("notes", "/run/notes"),
+        McpServer {
+            env: [("TOOL_TOKEN".to_string(), "tok".to_string())].into(),
+            ..server("threads", "/run/threads-mcp")
+        },
+    ];
+    setter.set_mcp(&servers).unwrap();
+    until("the new server's tool allowed", || {
+        std::fs::read_to_string(&log).is_ok_and(|b| {
+            b.lines()
+                .any(|l| l.contains(r#""request_id":"p-2""#) && l.contains(r#""behavior":"allow""#))
+        })
+    });
+    let mut more = servers.clone();
+    more.push(server("broken", "/run/broken"));
+    let e = setter
+        .set_mcp(&more)
+        .expect_err("a server Claude Code can't start");
+    assert!(
+        e.to_string()
+            .starts_with(r#"Claude Code did not take the MCP servers: {"#)
+            && e.to_string().contains(r#""broken":"failed to start""#),
+        "{e}"
+    );
+    conn.close().unwrap();
+    loop {
+        match rx.recv_timeout(WAIT).expect("the session's end") {
+            Said::Ended(..) => break,
+            Said::Event(_, Event::Approval(a)) => panic!("the new server's tool asked: {}", a.id),
+            Said::Event(..) => {}
+        }
+    }
+    want_in(
+        &log,
+        &[
+            r#""subtype":"mcp_set_servers""#,
+            r#""servers":{"notes":{"args":[],"command":"/run/notes","type":"stdio"},"t":{"name":"t","type":"sdk"},"threads":{"args":[],"command":"/run/threads-mcp","env":{"TOOL_TOKEN":"tok"},"type":"stdio"}}"#,
+        ],
+    );
+}
