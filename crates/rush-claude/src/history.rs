@@ -34,7 +34,18 @@ struct Line<'a> {
     message: Option<&'a RawValue>,
     #[serde(rename = "toolUseResult", borrow)]
     tool_use_result: Option<&'a RawValue>,
+    /// A queue-operation's: enqueue, remove, dequeue.
+    #[serde(borrow)]
+    operation: Str<'a>,
+    /// What a queue-operation queued.
+    #[serde(borrow)]
+    content: Option<&'a RawValue>,
 }
+
+/// The background tasks a read has told ended already, by id, call and
+/// status: Claude Code queues a notice, takes it, and may write it as a
+/// message too, and each is told once.
+type Told = std::collections::HashSet<String>;
 
 /// What one line comes to.
 enum Took {
@@ -44,7 +55,7 @@ enum Took {
     Past,
 }
 
-fn take(dec: &mut dyn MessageDecoder, b: &[u8], before: Ms) -> Took {
+fn take(dec: &mut dyn MessageDecoder, b: &[u8], before: Ms, told: &mut Told) -> Took {
     let b = b.strip_suffix(b"\n").unwrap_or(b);
     if b.is_empty() {
         return Took::Skip;
@@ -61,6 +72,18 @@ fn take(dec: &mut dyn MessageDecoder, b: &[u8], before: Ms) -> Took {
             return Took::Past;
         }
     }
+    if let Some(text) = notice(&l) {
+        let done: Vec<Event> = ended(&text)
+            .into_iter()
+            .filter(|d| told.insert(format!("{},{},{}", d.id, d.call_id, d.status)))
+            .map(Event::TaskDone)
+            .collect();
+        return if done.is_empty() {
+            Took::Skip
+        } else {
+            Took::Events(done)
+        };
+    }
     if &*l.typ != "user" && &*l.typ != "assistant" {
         return Took::Skip;
     }
@@ -68,6 +91,61 @@ fn take(dec: &mut dyn MessageDecoder, b: &[u8], before: Ms) -> Took {
         return Took::Skip;
     };
     Took::Events(dec.message(&l.typ, m, l.tool_use_result))
+}
+
+/// A line's word that background tasks ended: Claude Code queues it as it
+/// comes, and only sometimes writes it as a user message too (the fork's
+/// history.go:192, notice).
+fn notice(l: &Line) -> Option<String> {
+    let text = match &*l.typ {
+        "queue-operation" if &*l.operation == "enqueue" => {
+            serde_json::from_str::<String>(l.content?.get()).ok()?
+        }
+        "user" => {
+            #[derive(Deserialize)]
+            struct M {
+                content: String,
+            }
+            serde_json::from_str::<M>(l.message?.get()).ok()?.content
+        }
+        _ => return None,
+    };
+    let text = text.trim();
+    text.starts_with("<task-notification>")
+        .then(|| text.to_string())
+}
+
+/// The tasks a notice says ended: the history keeps no task events, so
+/// without them a background agent started before a restart runs forever
+/// (the fork's history.go:215, ended).
+fn ended(s: &str) -> Vec<rush_core::event::TaskDone> {
+    s.split("<task-notification>")
+        .skip(1)
+        .filter_map(|seg| {
+            let seg = seg.split("</task-notification>").next().unwrap_or_default();
+            let status = match tag(seg, "status").as_str() {
+                st @ ("completed" | "failed" | "stopped") => st.to_string(),
+                "killed" => "stopped".to_string(),
+                _ => return None,
+            };
+            Some(rush_core::event::TaskDone {
+                id: tag(seg, "task-id"),
+                call_id: tag(seg, "tool-use-id"),
+                status,
+                output_file: tag(seg, "output-file"),
+                summary: tag(seg, "summary"),
+            })
+        })
+        .collect()
+}
+
+/// What s's first <name> holds, trimmed; "" without one.
+fn tag(s: &str, name: &str) -> String {
+    let Some((_, rest)) = s.split_once(&format!("<{name}>")) else {
+        return String::new();
+    };
+    let v = rest.split(&format!("</{name}>")).next().unwrap_or_default();
+    v.trim().to_string()
 }
 
 /// A session with no transcript to read.
@@ -95,6 +173,7 @@ pub(crate) fn read(
     }
     let mut r = BufReader::with_capacity(64 << 10, File::open(&s.transcript)?);
     let mut dec = crate::messages();
+    let mut told = Told::new();
     let (mut out, mut taken, mut line) = (Vec::new(), 0usize, Vec::new());
     loop {
         line.clear();
@@ -103,7 +182,7 @@ pub(crate) fn read(
             break;
         }
         taken += n;
-        match take(dec.as_mut(), &line, before) {
+        match take(dec.as_mut(), &line, before, &mut told) {
             Took::Events(evs) => out.extend(evs),
             Took::Skip => {}
             Took::Past => break,
@@ -141,13 +220,14 @@ pub(crate) fn tail(s: &Session, most: i64) -> adapter::Result<(Vec<Event>, bool)
     f.seek(SeekFrom::Start(span.start))?;
     let mut r = BufReader::with_capacity(64 << 10, f.take(span.len()));
     let mut dec = crate::messages();
+    let mut told = Told::new();
     let (mut out, mut line) = (Vec::new(), Vec::new());
     loop {
         line.clear();
         if r.read_until(b'\n', &mut line)? == 0 {
             break;
         }
-        if let Took::Events(evs) = take(dec.as_mut(), &line, 0) {
+        if let Took::Events(evs) = take(dec.as_mut(), &line, 0, &mut told) {
             out.extend(evs);
         }
     }
@@ -165,6 +245,7 @@ pub(crate) fn follow(s: &Session) -> adapter::Result<Box<dyn Follow>> {
         off: 0,
         seen: None,
         dec: crate::messages(),
+        told: Told::new(),
     }))
 }
 
@@ -176,6 +257,7 @@ struct Follower {
     /// The file read so far (adapter::file_id), to tell one renamed over it.
     seen: Option<(u64, u64)>,
     dec: Box<dyn MessageDecoder>,
+    told: Told,
 }
 
 impl Follow for Follower {
@@ -188,6 +270,7 @@ impl Follow for Follower {
             // Rewritten, or another file renamed over it: start over.
             self.off = 0;
             self.dec = crate::messages();
+            self.told.clear();
             out.reset = true;
         }
         if size == self.off {
@@ -212,7 +295,7 @@ impl Follow for Follower {
             None => return Ok(out), // a line still being written waits
         };
         for l in buf[..full].split_inclusive(|&c| c == b'\n') {
-            if let Took::Events(evs) = take(self.dec.as_mut(), l, 0) {
+            if let Took::Events(evs) = take(self.dec.as_mut(), l, 0, &mut self.told) {
                 out.events.extend(evs);
             }
         }
@@ -292,6 +375,77 @@ mod tests {
         })
         .unwrap();
         assert_eq!(got, ["m0", "m1", "m2"]);
+    }
+
+    // The fork's history_test.go:17 (TestHistoryEndsBackgroundTasks): a
+    // background agent's end, which Claude Code only queues, reads back as
+    // its task done, told once though it's queued, taken and written as a
+    // message too; that message isn't the person's.
+    #[test]
+    fn background_tasks_end_in_history() {
+        let d = TempDir::new("bgend");
+        let p = d.0.join("t.jsonl");
+        let notice = r#"<task-notification>\n<task-id>a66</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<output-file>/o</output-file>\n<status>completed</status>\n<summary>Agent \"look\" finished</summary>\n</task-notification>"#;
+        let lines = [
+            r#"{"type":"assistant","timestamp":"2026-09-29T10:00:00Z","uuid":"a1","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Agent","input":{"description":"look","prompt":"p","run_in_background":true}}]}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-29T10:00:01Z","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Async agent launched"}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a66"}}"#.to_string(),
+            format!(r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-29T10:05:00Z","content":"{notice}"}}"#),
+            format!(r#"{{"type":"queue-operation","operation":"remove","timestamp":"2026-09-29T10:05:01Z","content":"{notice}"}}"#),
+            format!(r#"{{"type":"user","timestamp":"2026-09-29T10:05:02Z","uuid":"u2","message":{{"role":"user","content":"{notice}"}}}}"#),
+        ];
+        std::fs::write(&p, lines.join("\n") + "\n").unwrap();
+        let s = Session {
+            transcript: p.to_string_lossy().into_owned(),
+            ..Session::default()
+        };
+        let want = rush_core::event::TaskDone {
+            id: "a66".into(),
+            call_id: "toolu_1".into(),
+            status: "completed".into(),
+            output_file: "/o".into(),
+            summary: "Agent \"look\" finished".into(),
+        };
+        let c = crate::Claude::new();
+        let (tailed, _) = tail(&s, 1 << 20).unwrap();
+        for (how, evs) in [("read", read_history(&c, &s, 0).unwrap()), ("tail", tailed)] {
+            let done: Vec<_> = evs
+                .iter()
+                .filter_map(|e| match e {
+                    Event::TaskDone(d) => Some(d.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(done, std::slice::from_ref(&want), "{how}");
+            assert!(
+                !texts(&evs)
+                    .iter()
+                    .any(|t| t.contains("<task-notification>")),
+                "{how}: the notice read as the person's message"
+            );
+        }
+    }
+
+    // The statuses a notice ends a task with: killed is stopped; one still
+    // running isn't an end.
+    #[test]
+    fn notices_end_tasks() {
+        let seg = |status: &str| {
+            format!(
+                "<task-notification><task-id>t</task-id><status>{status}</status></task-notification>"
+            )
+        };
+        for (status, want) in [
+            ("completed", Some("completed")),
+            ("failed", Some("failed")),
+            ("stopped", Some("stopped")),
+            ("killed", Some("stopped")),
+            ("running", None),
+        ] {
+            let got = ended(&seg(status));
+            assert_eq!(got.first().map(|d| d.status.as_str()), want, "{status}");
+        }
+        let two = format!("{}{}", seg("completed"), seg("failed"));
+        assert_eq!(ended(&two).len(), 2);
     }
 
     #[test]
