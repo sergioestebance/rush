@@ -2513,10 +2513,15 @@ impl Host {
     /// Whether a message sent now waits for the turn to be stopped rather
     /// than going to it. One that steers never stops for a message.
     fn cuts_in(&self, st: &State) -> bool {
+        self.can_cut(st) && !crate::inbox::steers(&self.reg, &st.cfg.kind)
+    }
+
+    /// Whether a message can stop the turn under way to go next: its agent
+    /// is working and can be stopped mid-turn.
+    fn can_cut(&self, st: &State) -> bool {
         st.conn.is_some()
             && st.info.state == "working"
             && self.reg.supports(&st.cfg.kind, Feature::Interrupt)
-            && !crate::inbox::steers(&self.reg, &st.cfg.kind)
     }
 
     /// Puts text and its images at place at in the queue, so it's sent
@@ -3148,8 +3153,9 @@ impl Host {
             }
             "queue_send" => {
                 let i = st.info.queue.iter().position(|q| *q == o.was);
-                // One that steers takes it into the turn, never stopped for it.
-                if (o.guide || self.steers(&st))
+                // One that steers takes it into the turn, never stopped for
+                // it, unless sent now (now: stop the turn for it).
+                if (o.guide || (self.steers(&st) && !o.now))
                     && !o.was.is_empty()
                     && let Some(i) = i
                 {
@@ -3158,7 +3164,7 @@ impl Host {
                 // Mid-turn it cuts in, as a send now does.
                 if let Some(i) = i
                     && !o.was.is_empty()
-                    && self.cuts_in(&st)
+                    && (self.cuts_in(&st) || (o.now && self.can_cut(&st)))
                 {
                     let mut qi = queue_images(&st.info);
                     let mut qe = queue_exchanges(&st.info);

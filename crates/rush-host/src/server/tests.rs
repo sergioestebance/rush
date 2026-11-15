@@ -2735,6 +2735,33 @@ fn codex_queue_send_steers_never_stops() {
     assert_eq!(c.stops.load(Ordering::SeqCst), 0);
 }
 
+// A queued message sent now (now: stop the turn for it, as a remote
+// client's send now asks) cuts into a working Codex's turn as into any
+// other: the turn is stopped and the message goes first when it ends,
+// rather than steered in. Without now it steers, as above (the fork's
+// host.go:1855: steering only when guide is set).
+#[test]
+fn codex_queue_send_now_cuts_in() {
+    let _home = Home::new();
+    let h = codex_host("cn");
+    let c = Arc::new(Kept::default());
+    with_conn(&h, c.clone());
+    {
+        let mut st = h.lock();
+        st.info.state = "working".into();
+        st.info.queue = vec!["a".into(), "b".into()];
+    }
+    h.do_op(op("queue_send", |o| {
+        o.index = 1;
+        o.was = "b".into();
+        o.now = true;
+    }))
+    .unwrap();
+    assert!(c.got.lock().unwrap().is_empty(), "steered in");
+    assert_eq!(c.stops.load(Ordering::SeqCst), 1, "the turn wasn't stopped");
+    assert_eq!(queue(&h), "b|a");
+}
+
 // What waits in a working Codex's queue (a steer that failed) goes on the
 // next look, all of it as one message.
 #[test]
