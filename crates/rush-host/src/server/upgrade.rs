@@ -195,6 +195,8 @@ impl Host {
             mode: c.permission_mode.clone(),
             lightly: true,
             tools: vec![crate::agtools::tool_server(self.reg.clone(), &c.id)],
+            // Its caller's servers run on in it: their tools stay trusted.
+            mcp: c.mcp.clone(),
             ..StartOptions::default()
         };
         let pid = u.pid;

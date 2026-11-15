@@ -1,14 +1,15 @@
 //! A Conn against a fake app-server on the far end of two pipes. Port of
 //! codex_test.go (TestHandshake, TestThreadStartParams, TestTurn,
 //! TestCommandApproval, TestPermissionsAndQuestion, TestFileChange,
-//! TestRateLimitNotification, TestTrustedToolsApproved), compact_test.go,
+//! TestRateLimitNotification, TestTrustedToolsApproved,
+//! TestThreadStartCallerMCP, TestThreadStartCallerMCPWithoutArgs), compact_test.go,
 //! kids_test.go, shells_test.go and modeof_test.go.
 
 use super::*;
 use std::io::{BufRead, BufReader, PipeReader, PipeWriter, Write};
 use std::sync::mpsc;
 
-use rush_core::adapter::ToolServer;
+use rush_core::adapter::{McpServer, ToolServer};
 use rush_core::tool::Patch;
 
 /// What the sink was told.
@@ -754,6 +755,64 @@ fn trusted_tools_approved() {
             .as_array()
             .is_some_and(|v| v.iter().any(|n| n == "PATH"))
     );
+}
+
+/// The thread/start a fresh Conn sends for o.
+fn thread_start(o: StartOptions) -> Value {
+    let (c, mut f, _rx) = connect();
+    let _h = begin(&c, o);
+    let init = f.expect("initialize");
+    f.respond(&init, json!({"userAgent": "rush/1"}));
+    f.expect("initialized");
+    f.expect("thread/start")
+}
+
+// codex_test.go:148 and :170 (TestThreadStartCallerMCP,
+// TestThreadStartCallerMCPWithoutArgs): a caller's MCP servers start with
+// the thread, the session's environment passed on and each server's own
+// set over it; one with no arguments has an empty list, as Codex refuses
+// a null one and the whole thread with it.
+#[test]
+fn thread_start_caller_mcp() {
+    let cases = [
+        (
+            McpServer {
+                name: "threads".into(),
+                command: "/run/threads".into(),
+                args: vec!["serve".into()],
+                env: [("TOOL_TOKEN".to_string(), "s".to_string())].into(),
+            },
+            json!(["serve"]),
+            json!({"TOOL_TOKEN": "s"}),
+        ),
+        (
+            McpServer {
+                name: "threads".into(),
+                command: "/run/threads".into(),
+                ..McpServer::default()
+            },
+            json!([]),
+            Value::Null,
+        ),
+    ];
+    for (m, args, env) in cases {
+        let ts = thread_start(StartOptions {
+            dir: "/w".into(),
+            env: vec!["TOOL_TOKEN=t".into()],
+            mcp: vec![m],
+            ..StartOptions::default()
+        });
+        let srv = &ts["params"]["config"]["mcp_servers.threads"];
+        assert_eq!(srv["command"], "/run/threads", "{srv}");
+        assert_eq!(srv["args"], args, "{srv}");
+        assert_eq!(srv["env"], env, "{srv}");
+        assert!(
+            srv["env_vars"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|n| n == "TOOL_TOKEN")),
+            "{srv}"
+        );
+    }
 }
 
 // A project's CLAUDE.md is read where it has no AGENTS.md, and the

@@ -274,9 +274,20 @@ fn own_traffic_stays_off_the_tap() {
             r#"{"type":"control_request","request_id":"a","request":{"subtype":"can_use_tool","tool_name":"mcp__rush__erase"}}"#,
             false,
         ),
+        // A caller's server's tool never asks; another's with its name
+        // for a start does.
+        (
+            r#"{"type":"control_request","request_id":"a","request":{"subtype":"can_use_tool","tool_name":"mcp__threads__reply"}}"#,
+            true,
+        ),
+        (
+            r#"{"type":"control_request","request_id":"a","request":{"subtype":"can_use_tool","tool_name":"mcp__threadsx__reply"}}"#,
+            false,
+        ),
         (r#"{"type":"user"}"#, false),
     ] {
-        assert_eq!(own_traffic(&tools, line.as_bytes()), want, "{line}");
+        let mcp = [server("threads", "/run/threads")];
+        assert_eq!(own_traffic(&tools, &mcp, line.as_bytes()), want, "{line}");
     }
     assert!(relay_only(br#"{"type":"stream_event","event":{}}"#));
     assert!(!relay_only(br#"{"type":"assistant"}"#));
@@ -442,4 +453,128 @@ fn moved_after_the_login_in_use_changes() {
     assert!(!moved_off(true, &a, &a));
     assert!(moved_off(true, &b, &a));
     assert!(!moved_off(false, &b, &a));
+}
+
+/// A server of the caller's, named name, run by command.
+fn server(name: &str, command: &str) -> McpServer {
+    McpServer {
+        name: name.into(),
+        command: command.into(),
+        ..McpServer::default()
+    }
+}
+
+/// Waits up to WAIT for ok.
+fn until(what: &str, ok: impl Fn() -> bool) {
+    let end = std::time::Instant::now() + WAIT;
+    while !ok() {
+        assert!(std::time::Instant::now() < end, "timed out: {what}");
+        std::thread::park_timeout(Duration::from_millis(20));
+    }
+}
+
+// conn_test.go:153 (TestCallerMCPConfig): a caller's MCP servers reach
+// Claude Code as one config beside rush's own, every tool of theirs
+// trusted. With a scratch folder the config is a file only the user
+// reads, so a server's environment stays off the command line. Each goes
+// with its args, [] when it has none.
+#[test]
+fn caller_mcp_config() {
+    assert!(mcp_flags(&[], "").unwrap().is_empty(), "none");
+    let mut servers = vec![McpServer {
+        args: vec!["serve".into()],
+        ..server("threads", "/run/threads")
+    }];
+    let cases: [(&[McpServer], &str); 2] = [
+        (
+            &servers,
+            r#"{"mcpServers":{"threads":{"type":"stdio","command":"/run/threads","args":["serve"]}}}"#,
+        ),
+        (
+            &[server("notes", "/run/notes")],
+            r#"{"mcpServers":{"notes":{"type":"stdio","command":"/run/notes","args":[]}}}"#,
+        ),
+    ];
+    for (s, want) in cases {
+        assert_eq!(
+            mcp_flags(s, "").unwrap(),
+            vec!["--mcp-config".to_string(), want.into()]
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tmp = dir.path().join("tmp").display().to_string();
+    servers[0].env = [("TOOL_TOKEN".to_string(), "tok".to_string())].into();
+    let f = mcp_flags(&servers, &tmp).unwrap();
+    assert!(
+        f.len() == 2 && f[0] == "--mcp-config" && !f[1].contains("tok"),
+        "{f:?}"
+    );
+    assert_eq!(f[1], format!("{tmp}/{MCP_CONFIG_FILE}"));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&f[1]).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "the config file's mode");
+    want_in(&f[1], &[r#""env":{"TOOL_TOKEN":"tok"}"#]);
+    assert!(
+        trusted(&[], &[server("threads", "")]).contains(&"mcp__threads".to_string()),
+        "the caller's server isn't trusted"
+    );
+}
+
+/// What a Claude Code given a caller's server does: asks to run one of
+/// its tools, then logs every line.
+const ASKS_CALLERS_TOOL: &str = r#"read -r init; printf '%s\n' "$init" >> "$LOG"
+echo '{"type":"control_response","response":{"subtype":"success","request_id":"rush-1","response":{"commands":[]}}}'
+echo '{"type":"control_request","request_id":"p-3","request":{"subtype":"can_use_tool","tool_name":"mcp__threads__reply","input":{},"tool_use_id":"tu-3"}}'
+while read -r line; do printf '%s\n' "$line" >> "$LOG"; done
+"#;
+
+// The fork's conn.go:218 and :349: a session started with a caller's
+// server gives Claude Code its config file and trusts every tool of its,
+// so a call to one never asks; the file goes when Claude Code does.
+#[test]
+fn caller_mcp_servers_at_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bin, log) = fake_claude(dir.path(), ASKS_CALLERS_TOOL);
+    let log = log.display().to_string();
+    let tmp = dir.path().join("tmp");
+    let (tx, rx) = channel();
+    let conn = Claude::new()
+        .start(
+            StartOptions {
+                profile: crate::adapter::profile(&Account::at("x", dir.path().join("cfg"))),
+                binary: bin.display().to_string(),
+                temp_dir: tmp.display().to_string(),
+                mcp: vec![server("threads", "/run/threads")],
+                ..StartOptions::default()
+            },
+            Arc::new(Tagged { key: 3u8, tx }),
+        )
+        .unwrap();
+    let file = tmp.join(MCP_CONFIG_FILE);
+    assert!(file.exists(), "no config file while Claude Code runs");
+    until("Claude Code started", || {
+        std::fs::read_to_string(&log).is_ok_and(|b| !b.is_empty())
+    });
+    want_in(
+        &format!("{log}.args"),
+        &[
+            "--allowedTools mcp__threads ",
+            &format!("--mcp-config {}", file.display()),
+        ],
+    );
+    until("the caller's tool allowed", || {
+        std::fs::read_to_string(&log).is_ok_and(|b| {
+            b.lines()
+                .any(|l| l.contains(r#""request_id":"p-3""#) && l.contains(r#""behavior":"allow""#))
+        })
+    });
+    conn.close().unwrap();
+    loop {
+        match rx.recv_timeout(WAIT).expect("the session's end") {
+            Said::Ended(..) => break,
+            Said::Event(_, Event::Approval(a)) => panic!("the caller's tool asked: {}", a.id),
+            Said::Event(..) => {}
+        }
+    }
+    until("the config file gone", || !file.exists());
 }

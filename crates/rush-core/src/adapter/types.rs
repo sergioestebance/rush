@@ -5,7 +5,8 @@
 //! :73, Dir and Reads :23-57, FrontMatter's Unquote :132), screen.go,
 //! settings.go, settingspage.go, updater.go, rewind.go, plugins.go,
 //! stats.go, subagents.go, timeline.go, summary.go, rows.go, spend.go;
-//! choices.go:62-89 (Trust, TrustedAs).
+//! choices.go:62-89 (Trust, TrustedAs). From the fork: conn.go:30-41
+//! (MCPServer, MCPMost).
 
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -147,6 +148,9 @@ pub struct StartOptions {
     pub subagent_model: String,
     /// MCP servers rush serves in process for the session.
     pub tools: Vec<ToolServer>,
+    /// MCP servers of the caller's own, run by the agent as processes, in
+    /// name order (the fork's adapter.go:134).
+    pub mcp: Vec<McpServer>,
     /// Subagents to offer it, by name, each defined in its agent's own
     /// words; prompt is added to its system prompt.
     pub agents: BTreeMap<String, RawJson>,
@@ -182,6 +186,36 @@ pub struct ToolServer {
     /// servers so: rush's own executable with these.
     pub args: Vec<String>,
 }
+
+/// An MCP server of the caller's own the agent runs as a process beside
+/// rush's, its tools all trusted: the caller chose it (the fork's
+/// conn.go:32, MCPServer). It reads and writes as Go's does, its args and
+/// env left out when it has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpServer {
+    pub name: String,
+    pub command: String,
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::wire::nullvec::deserialize"
+    )]
+    pub args: Vec<String>,
+    /// Added to the server's environment, over the agent's own.
+    #[serde(
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "null_map"
+    )]
+    pub env: BTreeMap<String, String>,
+}
+
+fn null_map<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, String>, D::Error> {
+    Ok(Option::<BTreeMap<String, String>>::deserialize(d)?.unwrap_or_default())
+}
+
+/// How many of its caller's MCP servers a session runs at most (the
+/// fork's conn.go:41, MCPMost).
+pub const MCP_MOST: usize = 16;
 
 /// A message to a session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1034,6 +1068,40 @@ pub fn tmpdir_env(dir: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The fork's internal/agent/conn.go:32 (MCPServer): a caller's server
+    // reads and writes as Go's does, its args and env left out when it has
+    // none, and a null in either reads as none.
+    #[test]
+    fn an_mcp_server_is_written_as_gos() {
+        let cases: [(McpServer, &str); 2] = [
+            (
+                McpServer {
+                    name: "threads".into(),
+                    command: "/run/threads".into(),
+                    ..McpServer::default()
+                },
+                r#"{"name":"threads","command":"/run/threads"}"#,
+            ),
+            (
+                McpServer {
+                    name: "threads".into(),
+                    command: "/run/threads".into(),
+                    args: vec!["serve".into()],
+                    env: [("TOKEN".to_string(), "t".to_string())].into(),
+                },
+                r#"{"name":"threads","command":"/run/threads","args":["serve"],"env":{"TOKEN":"t"}}"#,
+            ),
+        ];
+        for (m, want) in cases {
+            assert_eq!(serde_json::to_string(&m).unwrap(), want);
+            assert_eq!(serde_json::from_str::<McpServer>(want).unwrap(), m);
+        }
+        let m: McpServer =
+            serde_json::from_str(r#"{"name":"x","command":"/x","args":null,"env":null}"#).unwrap();
+        assert!(m.args.is_empty() && m.env.is_empty());
+        assert_eq!(MCP_MOST, 16);
+    }
 
     #[test]
     fn tmpdir_env_ends_in_one_slash() {

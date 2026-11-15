@@ -23,7 +23,8 @@ use crate::wire::Config;
 
 /// An agent other than Claude Code: each message runs a command it asks to
 /// run, then ends the turn. Its starts are logged to starts.log beside its
-/// profile, with the session it resumed (agent_test.go's fakeAgent).
+/// profile, with the session it resumed and its caller's MCP servers
+/// (agent_test.go's fakeAgent).
 #[derive(Clone)]
 pub struct Fake {
     pub kind: &'static str,
@@ -109,7 +110,12 @@ impl Driver for Fake {
                 .create(true)
                 .append(true)
                 .open(Path::new(&o.profile.dir).join("starts.log"))?;
-            writeln!(f, "{}", format!("start {resumed}").trim())?;
+            let mut line = format!("start {resumed}").trim().to_string();
+            if !o.mcp.is_empty() {
+                line.push_str(" mcp=");
+                line.push_str(&mcp_line(&o.mcp));
+            }
+            writeln!(f, "{line}")?;
         }
         // A resumed conversation goes on as itself, as a real agent's
         // does: a compaction's fresh one isn't renamed under its caller.
@@ -128,6 +134,16 @@ impl Driver for Fake {
             closed: AtomicUsize::new(0),
         }))
     }
+}
+
+/// servers as name=command pairs, in their order (the fork's
+/// mcp_test.go, mcpLine).
+pub fn mcp_line(servers: &[rush_core::adapter::McpServer]) -> String {
+    servers
+        .iter()
+        .map(|m| format!("{}={}", m.name, m.command))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 struct FakeConn {
@@ -354,6 +370,42 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(acct.join("starts.log")).unwrap(),
             "start res1-conversation\n"
+        );
+        Client::dial(&c.id).unwrap().stop().unwrap();
+    }
+
+    /// A session's caller's MCP servers reach its agent as it starts, in
+    /// name order (the fork's agent.go:65, StartOptions.MCP).
+    #[test]
+    fn a_sessions_mcp_servers_reach_its_agent() {
+        let home = Home::new();
+        let acct = home.path().join("acct");
+        std::fs::create_dir_all(&acct).unwrap();
+        let mut c = cfg(&home, "mcp1", &acct);
+        c.mcp = ["notes", "threads"]
+            .into_iter()
+            .map(|n| rush_core::adapter::McpServer {
+                name: n.into(),
+                command: format!("/run/{n}"),
+                ..Default::default()
+            })
+            .collect();
+        let c = spawn(registry(), c).unwrap();
+        let log = acct.join("starts.log");
+        let w = rush_sys::fswait::Watcher::new();
+        w.watch(&[&acct]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .ends_with('\n')
+        {
+            let now = Instant::now();
+            assert!(now < deadline, "never started");
+            w.wait(None, Some((deadline - now).min(Duration::from_millis(50))));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "start mcp1-conversation mcp=notes=/run/notes threads=/run/threads\n"
         );
         Client::dial(&c.id).unwrap().stop().unwrap();
     }

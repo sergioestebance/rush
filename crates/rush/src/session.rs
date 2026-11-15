@@ -11,7 +11,8 @@
 //! :740, sessionList :767), serve.go:58 (serve's starts) and exchange.go:24
 //! (outgoingExchange, here spawn.rs's); api is session_api.rs's. answer is the agtop fork's
 //! cmd/rush/answer.go (skippedQuestion :16, sessionAnswer :24, asking
-//! :102, waits :109, pendingOf :141).
+//! :102, waits :109, pendingOf :141). From the fork: a start's caller's
+//! MCP servers (session.go:270, :359; serve.go:72).
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -348,6 +349,9 @@ pub struct StartOpts {
     /// The conversation a new session continues a copy of, under an id of
     /// its own.
     pub fork_from: String,
+    /// The caller's own MCP servers, in place of any it ran with (the
+    /// fork's session.go:270).
+    pub mcp: Vec<rush_core::adapter::McpServer>,
 }
 
 /// Starts a session as a remote client asks (serve.go:58).
@@ -369,6 +373,7 @@ pub fn start_requested(reg: &Registry, r: &StartRequest) -> Result<Info, String>
             meta: (!r.meta.is_empty()).then(|| r.meta.clone()),
             binary: r.binary.clone(),
             env: r.env_list(),
+            mcp: r.mcp_list(),
             ..StartOpts::default()
         },
     )
@@ -487,6 +492,9 @@ pub fn start_session(env: &Env, o: StartOpts) -> Result<Info, String> {
     cfg.binary = or(&o.binary, &cfg.binary);
     if !o.env.is_empty() {
         cfg.env = o.env.clone();
+    }
+    if !o.mcp.is_empty() {
+        cfg.mcp = o.mcp.clone();
     }
     if let Some(m) = &o.meta {
         cfg.meta.extend(m.clone());
@@ -1710,6 +1718,33 @@ mod tests {
         assert_eq!(cfg.binary, "/opt/wrapper");
         assert_eq!(cfg.env, vec!["TOOL_TOKEN=t".to_string()]);
         assert_eq!(cfg.meta.get("app.chat").map(String::as_str), Some("c1"));
+        let _ = run(&env, &["stop", &info.id], "");
+    }
+
+    // The fork's session_test.go:446 (TestStartKeepsCallerMCP): a remote
+    // start's MCP servers are kept with the session, so a resume starts
+    // the agent with them again.
+    #[test]
+    fn start_keeps_caller_mcp() {
+        let home = Home::new();
+        let env = fake_env();
+        let mcp = vec![rush_core::adapter::McpServer {
+            name: "threads".into(),
+            command: "/opt/threads-mcp".into(),
+            args: vec!["serve".into()],
+            ..Default::default()
+        }];
+        let info = start_session(
+            &env,
+            StartOpts {
+                cwd: home.path(),
+                kind: "fake".into(),
+                mcp: mcp.clone(),
+                ..StartOpts::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(rush_host::read_config(&info.id).unwrap().mcp, mcp);
         let _ = run(&env, &["stop", &info.id], "");
     }
 

@@ -13,9 +13,10 @@
 //! reachedAt (:100, :120), devices.go's handlers (:200, :209) and watch.go's
 //! push handlers (:15, :23). From the fork: remove (server.go:792), the
 //! synced frames (server.go:918, :1016; resume.go:171), the commands
-//! frames (server.go:910, :1062), the history route (server.go:171) and a
+//! frames (server.go:910, :1062), the history route (server.go:171), a
 //! stream's tail of turns in place of its last events (server.go:915,
-//! :939; see resume.rs).
+//! :939; see resume.rs) and the caller's MCP servers (StartRequest.MCP
+//! :97-120, allowedMCP :462, mcpName :574).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{Read, Write};
@@ -25,7 +26,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use rush_core::adapter::{AdapterRef, Profile, Registry, Session as AgentSession, migrated};
+use rush_core::adapter::{
+    AdapterRef, MCP_MOST, McpServer, Profile, Registry, Session as AgentSession, migrated,
+};
 use rush_core::event::{self, Event};
 use rush_core::wire::RawJson;
 use rush_host::{Away, Info};
@@ -83,6 +86,25 @@ pub struct StartRequest {
     /// Added to the agent's environment, on a serve with programs folders.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// MCP servers the agent runs beside rush's own, by name, each program
+    /// from one of serve's programs folders.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: BTreeMap<String, McpSpec>,
+}
+
+/// One MCP server a start or an mcp op asks for: its program, by full
+/// path, its arguments, and what it adds to its environment (MCPSpec).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpSpec {
+    pub command: String,
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "rush_core::wire::nullvec::deserialize"
+    )]
+    pub args: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl StartRequest {
@@ -90,6 +112,36 @@ impl StartRequest {
     pub fn env_list(&self) -> Vec<String> {
         self.env.iter().map(|(k, v)| format!("{k}={v}")).collect()
     }
+
+    /// mcp as the host takes it, in name order (MCPList).
+    pub fn mcp_list(&self) -> Vec<McpServer> {
+        mcp_list(&self.mcp)
+    }
+}
+
+/// servers as the host takes them, in name order (mcpList).
+fn mcp_list(servers: &BTreeMap<String, McpSpec>) -> Vec<McpServer> {
+    servers
+        .iter()
+        .map(|(name, m)| McpServer {
+            name: name.clone(),
+            command: m.command.clone(),
+            args: m.args.clone(),
+            env: m.env.clone(),
+        })
+        .collect()
+}
+
+/// Whether name is fit for a caller's MCP server: what an agent puts in its
+/// tools' names (mcpName, ^[A-Za-z0-9_-]{1,64}$), and none of rush's own,
+/// its tools' server or a plugin's (rush-<plugin>).
+fn mcp_name_ok(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && name != rush_bundled::agtools::SERVER
+        && !name.starts_with(rush_plugin::SERVER_PREFIX)
 }
 
 /// Whether labels a remote client asked for are fit to store: a few short
@@ -109,8 +161,13 @@ pub fn meta_ok(m: &BTreeMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether env may be added to an agent's environment: at most 64
-/// variables, none of rush's own (allowedEnv).
+/// What a serve without programs folders says to a program, an
+/// environment or an MCP server of a client's.
+const NO_PROGRAMS: &str =
+    "this serve runs only the agents' own programs, with their own environment";
+
+/// Whether env may be added to an agent's or a server's environment: at
+/// most 64 variables, none of rush's own (allowedEnv).
 fn allowed_env(env: &BTreeMap<String, String>) -> Result<(), String> {
     if env.len() > 64 {
         return Err("at most 64 environment variables".into());
@@ -507,19 +564,42 @@ impl Server {
     /// none at all without programs folders, the program a file run from
     /// one of them, and no variable of rush's own (allowedProgram).
     pub fn allowed_program(&self, req: &StartRequest) -> Result<(), String> {
-        if req.binary.is_empty() && req.env.is_empty() {
+        if req.binary.is_empty() && req.env.is_empty() && req.mcp.is_empty() {
             return Ok(());
         }
         if self.programs.is_empty() {
-            return Err(
-                "this serve runs only the agents' own programs, with their own environment".into(),
-            );
+            return Err(NO_PROGRAMS.into());
         }
         allowed_env(&req.env)?;
+        self.allowed_mcp(&req.mcp)?;
         if req.binary.is_empty() {
             return Ok(());
         }
         self.serves_program(&req.binary)
+    }
+
+    /// Whether servers are MCP servers this serve runs, for a start or an
+    /// mcp op: none without programs folders, each program from one of
+    /// them, no name and no variable of rush's own (allowedMCP).
+    pub fn allowed_mcp(&self, servers: &BTreeMap<String, McpSpec>) -> Result<(), String> {
+        if servers.is_empty() {
+            return Ok(());
+        }
+        if self.programs.is_empty() {
+            return Err(NO_PROGRAMS.into());
+        }
+        if servers.len() > MCP_MOST {
+            return Err(format!("at most {MCP_MOST} MCP servers"));
+        }
+        for (name, m) in servers {
+            if !mcp_name_ok(name) {
+                return Err(format!("an MCP server can't be named {name:?}"));
+            }
+            self.serves_program(&m.command)
+                .and_then(|()| allowed_env(&m.env))
+                .map_err(|e| format!("MCP server {name}: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Whether prog is a program in one of this serve's programs folders,
