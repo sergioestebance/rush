@@ -8,7 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::client::{Client, Result, read_config, read_info, restart_agent_on};
+use rush_core::adapter::McpServer;
+
+use crate::client::{
+    Client, Result, read_config, read_info, restart_agent_on, restart_with_mcp_on,
+};
+use crate::fake::mcp_line;
 use crate::testing::Home;
 use crate::wire::Config;
 
@@ -32,6 +37,11 @@ fn ok_rush(home: &Home) -> PathBuf {
 /// A fake host for session id, mid-turn (its agent asks to run its
 /// shell), with a model and effort set.
 fn start(home: &Home, id: &str) -> Config {
+    start_with(home, id, Vec::new())
+}
+
+/// start, the session running its caller's MCP servers mcp.
+fn start_with(home: &Home, id: &str, mcp: Vec<McpServer>) -> Config {
     let acct = home.path().join("acct");
     std::fs::create_dir_all(&acct).unwrap();
     let mut cfg = Config {
@@ -43,6 +53,7 @@ fn start(home: &Home, id: &str) -> Config {
         prompt: "carry on".into(),
         model: "fake-big".into(),
         effort: "high".into(),
+        mcp,
         ..Config::default()
     };
     cfg.account.kind = "fake".into();
@@ -263,4 +274,137 @@ fn a_restart_holds_the_wake_lock_while_it_starts_the_new_host() {
         "the lock outlived the restart"
     );
     stop("ra3");
+}
+
+/// Servers named by name=command pairs.
+fn servers(pairs: &[(&str, &str)]) -> Vec<McpServer> {
+    pairs
+        .iter()
+        .map(|(n, c)| McpServer {
+            name: (*n).into(),
+            command: (*c).into(),
+            ..McpServer::default()
+        })
+        .collect()
+}
+
+// The fork's mcp_test.go:197 (TestRestartWithMCPStartsTheHostAgainWithTheServers):
+// a host from before mcp ops is restarted on the installed rush with the
+// servers added to the session's own, by name, and its agent starts again
+// with them; a name it runs already keeps its own server.
+#[test]
+fn a_restart_with_mcp_starts_the_host_again_with_the_servers() {
+    let home = Home::new();
+    start_with(&home, "rm1", servers(&[("notes", "/run/notes")]));
+    let exe = ok_rush(&home);
+    let sp = Spawner::new();
+    let add = servers(&[("threads", "/run/threads"), ("notes", "/run/other")]);
+    let before = read_info("rm1").unwrap();
+    restart_with_mcp_on("rm1", &add, &exe, &|c: Config, e: &Path| sp.spawn(c, e)).unwrap();
+    assert_eq!(sp.exes(), std::slice::from_ref(&exe), "not restarted");
+    assert!(
+        read_info("rm1").unwrap().generation > before.generation,
+        "a new host"
+    );
+    assert_eq!(
+        mcp_line(&read_config("rm1").unwrap().mcp),
+        "notes=/run/notes threads=/run/threads"
+    );
+    // Its agent starts again for the next message, with them.
+    let c = Client::dial("rm1").unwrap();
+    c.send("go on").unwrap();
+    c.close();
+    assert!(
+        until(&home, "rm1", || starts(&home).len() == 2),
+        "{:?}",
+        starts(&home)
+    );
+    assert!(
+        starts(&home)[1].ends_with(" mcp=notes=/run/notes threads=/run/threads"),
+        "{:?}",
+        starts(&home)
+    );
+    stop("rm1");
+}
+
+// The fork's mcp_test.go:237 and :252: a host whose session runs every
+// server named already is left as it is (nothing to add is no reason to
+// stop what it does), and a restart for servers holds the wake lock while
+// it starts the new host, as every restart does.
+#[test]
+fn a_restart_with_mcp_leaves_a_host_running_them_and_holds_the_wake_lock() {
+    let home = Home::new();
+    start_with(&home, "rm2", servers(&[("threads", "/run/threads")]));
+    let exe = ok_rush(&home);
+    let sp = Spawner::new();
+    let held = Mutex::new(Vec::new());
+    let spawn = |c: Config, e: &Path| {
+        held.lock().unwrap().push(wake_locked("rm2"));
+        sp.spawn(c, e)
+    };
+    restart_with_mcp_on("rm2", &servers(&[("threads", "/run/other")]), &exe, &spawn).unwrap();
+    assert!(sp.exes().is_empty(), "a host running them restarted");
+    assert_eq!(starts(&home).len(), 1, "its agent untouched");
+    restart_with_mcp_on("rm2", &servers(&[("notes", "/run/notes")]), &exe, &spawn).unwrap();
+    assert_eq!(
+        *held.lock().unwrap(),
+        [true],
+        "spawned without the wake lock"
+    );
+    stop("rm2");
+}
+
+// The fork's stale.go:108-127 (RestartWithMCP): what a restart for servers
+// refuses, leaving the session as it is: one past the 16 a session runs,
+// and a stand-in's host, which ends with the program that started it.
+#[test]
+fn a_restart_with_mcp_refuses_too_many_and_a_stand_in() {
+    let home = Home::new();
+    let exe = ok_rush(&home);
+    let sixteen: Vec<(String, String)> = (0..16)
+        .map(|i| (format!("s{i:02}"), format!("/run/s{i}")))
+        .collect();
+    let sixteen: Vec<(&str, &str)> = sixteen
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_str()))
+        .collect();
+    let cases = [
+        (
+            "rm3",
+            Config {
+                mcp: servers(&sixteen),
+                ..Config::default()
+            },
+            "a session runs at most 16 MCP servers of its caller's",
+        ),
+        (
+            "rm4",
+            Config {
+                owner: 4242,
+                ..Config::default()
+            },
+            "a stand-in's host ends with the program that started it",
+        ),
+    ];
+    for (id, mut cfg, want) in cases {
+        cfg.id = id.into();
+        cfg.kind = "fake".into();
+        std::fs::create_dir_all(crate::paths::dir(id)).unwrap();
+        std::fs::write(
+            crate::paths::dir(id).join("config.json"),
+            cfg.to_json_indent(),
+        )
+        .unwrap();
+        let sp = Spawner::new();
+        let e = restart_with_mcp_on(
+            id,
+            &servers(&[("threads", "/run/threads")]),
+            &exe,
+            &|c: Config, e: &Path| sp.spawn(c, e),
+        )
+        .expect_err(want);
+        assert_eq!(e.to_string(), want, "{id}");
+        assert!(sp.exes().is_empty(), "{id}: restarted");
+    }
+    let _ = &home;
 }

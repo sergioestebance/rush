@@ -5,6 +5,7 @@
 //! Ported from internal/host/client.go (all of it but StopAll's pull
 //! request followers, which are prdrive's), sleep.go:196-260 (Ensure) and
 //! stale.go:59-90 (Sweep). A gone host's reading is revive.go:52 (lose).
+//! From the fork: stale.go:101-127 (RestartWithMCP).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -1572,6 +1573,63 @@ pub fn restart_on(
     change: impl FnOnce(&mut Config),
 ) -> Result<()> {
     read_config(id)?;
+    preflight_restart(id, exe)?;
+    // Held from the stop until the new host accepts connections: a wake
+    // meanwhile waits, then finds it running, rather than starting a
+    // second host (sleep.go:202's lock, which ensure takes).
+    let _lock = wake_lock(id, Instant::now() + Duration::from_secs(15))?;
+    restart_locked(id, exe, spawn, change)
+}
+
+/// Restarts session id's host on the installed rush with servers added
+/// to its own, by name, as an mcp op adds them: for a host from before
+/// MCP_FROM, which can't take them live. Its agent carries on its
+/// conversation with them. It stops whatever the session is doing, so
+/// only between turns. A session that runs them all already is left as it
+/// is. It holds the session's wake lock throughout, so a wake meanwhile
+/// waits for the new host rather than starting a second one (the fork's
+/// stale.go:108, RestartWithMCP).
+pub fn restart_with_mcp(id: &str, servers: &[rush_core::adapter::McpServer]) -> Result<()> {
+    let exe = crate::reload::installed_exe()?;
+    restart_with_mcp_on(id, servers, &exe, &installed_spawn)
+}
+
+/// restart_with_mcp onto the rush at exe, its host started by spawn.
+pub fn restart_with_mcp_on(
+    id: &str,
+    servers: &[rush_core::adapter::McpServer],
+    exe: &Path,
+    spawn: SpawnOn,
+) -> Result<()> {
+    read_config(id)?;
+    preflight_restart(id, exe)?;
+    let _lock = wake_lock(id, Instant::now() + Duration::from_secs(15))?;
+    // Read under the lock: another restart for servers may have added them.
+    let cfg = read_config(id)?;
+    if !cfg.adds_mcp(servers) {
+        return Ok(());
+    }
+    if cfg.owner > 0 {
+        return Err("a stand-in's host ends with the program that started it"
+            .to_string()
+            .into());
+    }
+    let (all, _) = crate::wire::with_mcp(&cfg.mcp, servers);
+    if all.len() > rush_core::adapter::MCP_MOST {
+        return Err(format!(
+            "a session runs at most {} MCP servers of its caller's",
+            rush_core::adapter::MCP_MOST
+        )
+        .into());
+    }
+    restart_locked(id, exe, spawn, |cfg| {
+        cfg.mcp = crate::wire::with_mcp(&cfg.mcp, servers).0;
+    })
+}
+
+/// Whether the installed rush at exe can run session id, said as a
+/// restart's refusal when it can't.
+fn preflight_restart(id: &str, exe: &Path) -> Result<()> {
     if let Err(e) = crate::reload::preflight(exe, id) {
         log_event(
             id,
@@ -1582,10 +1640,17 @@ pub fn restart_on(
             format!("the installed rush can't run {id}, so its host carries on: {e}").into(),
         );
     }
-    // Held from the stop until the new host accepts connections: a wake
-    // meanwhile waits, then finds it running, rather than starting a
-    // second host (sleep.go:202's lock, which ensure takes).
-    let _lock = wake_lock(id, Instant::now() + Duration::from_secs(15))?;
+    Ok(())
+}
+
+/// The rest of a restart, under session id's wake lock: its host stopped,
+/// change applied to its config, and a new host started by spawn.
+fn restart_locked(
+    id: &str,
+    exe: &Path,
+    spawn: SpawnOn,
+    change: impl FnOnce(&mut Config),
+) -> Result<()> {
     let info = read_info(id).unwrap_or_default();
     // Its stop and its start again come of this.
     let ev = rush_events::id();

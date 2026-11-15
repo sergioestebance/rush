@@ -83,6 +83,24 @@ fn config_json_with_mcp_servers_as_the_fork_writes_it() {
     assert_eq!(String::from_utf8(c.to_json_indent()).unwrap(), want);
 }
 
+// The fork's server.go:763-771 and host.go:1747: serve's mcp op, an id to
+// answer and the servers as a list, reads and writes as the fork's; a host
+// from MCP_FROM on takes it live, one before it can't (stale.go:93).
+#[test]
+fn an_mcp_op_as_the_fork_sends_it() {
+    let line = r#"{"op":"mcp","id":"r1","mcp":[{"name":"threads","command":"/run/threads","env":{"TOKEN":"t"}}]}"#;
+    let o = Op::parse(line.as_bytes()).unwrap();
+    assert_eq!((o.op.as_str(), o.id.as_str()), ("mcp", "r1"));
+    assert_eq!(o.mcp[0].env.get("TOKEN").map(String::as_str), Some("t"));
+    assert_eq!(String::from_utf8(crate::json::line(&o)).unwrap(), line);
+    assert_eq!((crate::wire::PROTO, crate::wire::MCP_FROM), (13, 13));
+    let at = |proto| Info {
+        proto,
+        ..Info::default()
+    };
+    assert!(at(13).takes_mcp() && !at(12).takes_mcp());
+}
+
 #[test]
 fn info_json_as_go_writes_it() {
     for name in ["info_full.json", "info_empty.json"] {

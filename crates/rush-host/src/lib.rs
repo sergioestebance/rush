@@ -83,14 +83,15 @@ use std::time::Duration;
 
 pub use client::{
     Client, ClientError, Lister, deliver, ensure, list, read_config, read_info, remove, restart,
-    restart_agent, running, spawn,
+    restart_agent, restart_with_mcp, running, spawn,
 };
 pub use lines::{Decoder, Line, Sent, decode};
 pub use op::Op;
 pub use paths::{dir, events_path, new_session_id, root, short_id, sock_path};
 pub use server::run;
 pub use wire::{
-    Away, BinStamp, Branch, Config, Held, Info, Left, Limit, PROTO, Retry, Task, Workspace,
+    Away, BinStamp, Branch, Config, Held, Info, Left, Limit, MCP_FROM, PROTO, Retry, Task,
+    Workspace, with_mcp,
 };
 
 /// How long a sent message keeps an idle agent up (host.go:1145).

@@ -138,6 +138,16 @@ pub fn op_fields(o: &Op, err: Option<&str>) -> Option<Value> {
     put("index", o.index.into(), o.index != 0);
     put("to", o.to.into(), o.to != 0);
     put("without", o.without.clone().into(), !o.without.is_empty());
+    // Their names only: a server's environment may hold a token.
+    put(
+        "mcp",
+        o.mcp
+            .iter()
+            .map(|m| m.name.clone())
+            .collect::<Vec<_>>()
+            .into(),
+        !o.mcp.is_empty(),
+    );
     put(
         "away",
         serde_json::to_value(&o.away).unwrap_or(Value::Null),
