@@ -76,6 +76,11 @@ pub struct StartRequest {
     /// its own, leaving the original as it is.
     #[serde(rename = "forkFrom", skip_serializing_if = "String::is_empty")]
     pub fork_from: String,
+    /// The session's own system prompt: the host tells the agent it at
+    /// every start, beside rush's own guidance, by whichever channel the
+    /// agent reads. It is kept with the session, so a resume keeps it.
+    #[serde(rename = "systemPrompt", skip_serializing_if = "String::is_empty")]
+    pub system_prompt: String,
     /// Labels the host carries in its info, for the client that started it
     /// to know its own sessions by (an owner, a chat id).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]

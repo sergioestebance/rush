@@ -352,31 +352,37 @@ pub struct StartOpts {
     /// The caller's own MCP servers, in place of any it ran with (the
     /// fork's session.go:270).
     pub mcp: Vec<rush_core::adapter::McpServer>,
+    /// The session's own system prompt; empty keeps the one it was saved
+    /// with.
+    pub system_prompt: String,
 }
 
 /// Starts a session as a remote client asks (serve.go:58).
 pub fn start_requested(reg: &Registry, r: &StartRequest) -> Result<Info, String> {
-    start_session(
-        &Env::process(reg),
-        StartOpts {
-            cwd: r.cwd.clone(),
-            kind: r.agent.clone(),
-            profile: r.profile.clone(),
-            prompt: r.prompt.clone(),
-            model: r.model.clone(),
-            effort: r.effort.clone(),
-            name: r.name.clone(),
-            session_id: r.resume.clone(),
-            resume: !r.resume.is_empty(),
-            mode: r.mode.clone(),
-            fork_from: r.fork_from.clone(),
-            meta: (!r.meta.is_empty()).then(|| r.meta.clone()),
-            binary: r.binary.clone(),
-            env: r.env_list(),
-            mcp: r.mcp_list(),
-            ..StartOpts::default()
-        },
-    )
+    start_session(&Env::process(reg), requested_opts(r))
+}
+
+/// The start options a remote client's request asks for.
+fn requested_opts(r: &StartRequest) -> StartOpts {
+    StartOpts {
+        cwd: r.cwd.clone(),
+        kind: r.agent.clone(),
+        profile: r.profile.clone(),
+        prompt: r.prompt.clone(),
+        model: r.model.clone(),
+        effort: r.effort.clone(),
+        name: r.name.clone(),
+        session_id: r.resume.clone(),
+        resume: !r.resume.is_empty(),
+        mode: r.mode.clone(),
+        fork_from: r.fork_from.clone(),
+        meta: (!r.meta.is_empty()).then(|| r.meta.clone()),
+        binary: r.binary.clone(),
+        env: r.env_list(),
+        mcp: r.mcp_list(),
+        system_prompt: r.system_prompt.clone(),
+        ..StartOpts::default()
+    }
 }
 
 /// a, or b when a is empty.
@@ -490,6 +496,7 @@ pub fn start_session(env: &Env, o: StartOpts) -> Result<Info, String> {
     cfg.effort = or(&o.effort, &or(&cfg.effort, &start.effort));
     cfg.permission_mode = or(&o.mode, &or(&cfg.permission_mode, &start.mode));
     cfg.binary = or(&o.binary, &cfg.binary);
+    cfg.system_prompt = or(&o.system_prompt, &cfg.system_prompt);
     if !o.env.is_empty() {
         cfg.env = o.env.clone();
     }
@@ -1746,6 +1753,53 @@ mod tests {
         .unwrap();
         assert_eq!(rush_host::read_config(&info.id).unwrap().mcp, mcp);
         let _ = run(&env, &["stop", &info.id], "");
+    }
+
+    // Every field a remote start asks for reaches the start's options.
+    #[test]
+    fn a_requested_start_carries_its_system_prompt() {
+        let r: StartRequest =
+            serde_json::from_str(r#"{"cwd":"/w","systemPrompt":"Hand files back."}"#).unwrap();
+        assert_eq!(requested_opts(&r).system_prompt, "Hand files back.");
+    }
+
+    // A remote start's own system prompt is kept with the session, so the
+    // host tells the agent at every start; a resume that names none keeps
+    // it rather than dropping it.
+    #[test]
+    fn start_keeps_its_system_prompt_through_a_resume() {
+        let home = Home::new();
+        let env = fake_env();
+        let info = start_session(
+            &env,
+            StartOpts {
+                cwd: home.path(),
+                kind: "fake".into(),
+                system_prompt: "Hand files back with baker artifact.".into(),
+                ..StartOpts::default()
+            },
+        )
+        .unwrap();
+        let cfg = rush_host::read_config(&info.id).unwrap();
+        assert_eq!(cfg.system_prompt, "Hand files back with baker artifact.");
+        let _ = run(&env, &["stop", &info.id], "");
+        let back = start_session(
+            &env,
+            StartOpts {
+                cwd: home.path(),
+                kind: "fake".into(),
+                session_id: cfg.session_id.clone(),
+                resume: true,
+                ..StartOpts::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            rush_host::read_config(&back.id).unwrap().system_prompt,
+            "Hand files back with baker artifact.",
+            "a resume with no prompt keeps the saved one"
+        );
+        let _ = run(&env, &["stop", &back.id], "");
     }
 
     // start, info, list, interrupt, watch and stop against sessions the

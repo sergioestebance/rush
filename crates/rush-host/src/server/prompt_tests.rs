@@ -200,3 +200,29 @@ fn a_wrapped_session_is_told_of_no_kept_folder() {
         assert!(o.env.iter().any(|e| e.starts_with("TMPDIR=")), "{id}");
     }
 }
+
+/// A session's own prompt, which a remote client sets on its start, reaches
+/// each harness by the same channel as rush's guidance.
+#[test]
+fn a_sessions_own_prompt_reaches_every_harness() {
+    let _home = Home::new();
+    for kind in ["claude", "codex"] {
+        let (o, _h) = started_with(
+            kind,
+            Config {
+                id: format!("s{kind}"),
+                kind: kind.into(),
+                system_prompt: "Hand files back with baker artifact.".into(),
+                ..Config::default()
+            },
+        );
+        assert!(
+            o.prompt.contains("Hand files back with baker artifact."),
+            "{kind}"
+        );
+        assert!(
+            o.prompt.contains(TASKS_PROMPT),
+            "{kind}: rush's own guidance stays"
+        );
+    }
+}
