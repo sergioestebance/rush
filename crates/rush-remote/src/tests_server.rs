@@ -565,6 +565,16 @@ fn web_controls_reach_the_host() {
         ),
         ("/work", "claude", "go", "n")
     );
+    let r = post(
+        "/api/sessions",
+        r#"{"cwd":"/work","agent":"claude","systemPrompt":"Hand files back."}"#,
+    );
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(r.bytes()));
+    assert_eq!(
+        started.lock().unwrap().clone().unwrap().system_prompt,
+        "Hand files back.",
+        "a start's own system prompt reaches the host"
+    );
     let cases: Vec<(&str, &str, Value)> = vec![
         (
             "steer a queued one in",
