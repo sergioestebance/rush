@@ -591,6 +591,7 @@ fn background_counts_by_kind() {
             label: id.into(),
             agent: agent.into(),
             background: true,
+            ..Default::default()
         })
     };
     let listed = |ts: &[(&str, TaskKind, &str)]| {

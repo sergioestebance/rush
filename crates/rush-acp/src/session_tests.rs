@@ -886,6 +886,7 @@ fn subagent_call() {
             label: "say ok".into(),
             agent: "general-purpose".into(),
             background: false,
+            ..Default::default()
         }
     );
     f.update(json!({"sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed", "rawOutput": {"content": "ok"}}));
@@ -927,6 +928,7 @@ fn background_shell() {
             label: "sleep then hi".into(),
             agent: String::new(),
             background: true,
+            ..Default::default()
         }
     );
     assert_eq!(

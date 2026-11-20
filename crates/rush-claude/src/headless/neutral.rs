@@ -122,6 +122,7 @@ impl Neutral {
                 label: first_of(e.description, e.workflow),
                 agent: e.subagent_type,
                 background: e.backgrounded,
+                parent: e.parent_task,
             })],
             h::Event::TaskUpdated(e) => vec![Event::TaskUpdated(event::TaskUpdated {
                 id: e.id,
@@ -700,6 +701,30 @@ mod tests {
                 assert!(matches!(&evs[1], Event::Billing(b) if b.billing == Billing::Metered));
             }
         }
+    }
+
+    /// A task a subagent started names the subagent's task; one the
+    /// session started names none.
+    #[test]
+    fn a_task_started_by_a_subagent_names_its_parent() {
+        let mut nt = Neutral::new();
+        let Event::TaskStarted(st) = &n(
+            &mut nt,
+            r#"{"type":"system","subtype":"task_started","task_id":"a2","tool_use_id":"tu2","task_type":"local_agent","description":"inner probe","subagent_type":"general-purpose","is_backgrounded":true,"parent_task_id":"a1","spawn_depth":2}"#,
+        )[0] else {
+            panic!()
+        };
+        assert_eq!(
+            (st.id.as_str(), st.call_id.as_str(), st.parent.as_str()),
+            ("a2", "tu2", "a1")
+        );
+        let Event::TaskStarted(top) = &n(
+            &mut nt,
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"tu1","task_type":"local_agent"}"#,
+        )[0] else {
+            panic!()
+        };
+        assert_eq!(top.parent, "");
     }
 
     #[test]

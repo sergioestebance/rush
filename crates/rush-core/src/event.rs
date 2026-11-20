@@ -422,6 +422,11 @@ pub struct TaskStarted {
     /// A subagent's type.
     pub agent: String,
     pub background: bool,
+    /// The task that started it, when another did (a subagent's own
+    /// subagent or command); left out of the JSON when none, as Go's
+    /// event has none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub parent: String,
 }
 
 /// What changed about a task. status is set when it ends (completed,
@@ -1217,6 +1222,24 @@ mod tests {
             assert_eq!(line, want);
             assert_eq!(unmarshal(line.as_bytes()).unwrap(), ev, "{line}");
         }
+    }
+
+    /// A task another started names it, last; one with none writes what
+    /// Go writes (its golden line has no Parent).
+    #[test]
+    fn a_task_names_the_task_that_started_it() {
+        let ev = Event::TaskStarted(TaskStarted {
+            id: s("t"),
+            kind: TaskKind::Subagent,
+            parent: s("a1"),
+            ..Default::default()
+        });
+        let line = marshal(&ev).unwrap();
+        assert_eq!(
+            line,
+            r#"{"t":"task_started","e":{"ID":"t","CallID":"","Kind":1,"Label":"","Agent":"","Background":false,"Parent":"a1"}}"#
+        );
+        assert_eq!(unmarshal(line.as_bytes()).unwrap(), ev);
     }
 
     #[test]

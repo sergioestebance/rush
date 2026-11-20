@@ -239,6 +239,7 @@ fn background_subagent_is_a_subagent() {
             label: "look around".into(),
             agent: "Explore".into(),
             background: true,
+            ..Default::default()
         }),
         NOW - 600_000,
     );

@@ -412,6 +412,7 @@ impl Inner {
                 label: first_of(&[&inp.description, first]),
                 agent: inp.agent.clone(),
                 background: false,
+                ..Default::default()
             }));
         }
         let finished = !c.done && (status == "completed" || status == "failed");
@@ -480,6 +481,7 @@ impl Inner {
             label: first_of(&[&inp.description, &inp.command]),
             agent: inp.agent.clone(),
             background: true,
+            ..Default::default()
         };
         self.emit(Event::TaskStarted(ev));
         self.emit_background(st);

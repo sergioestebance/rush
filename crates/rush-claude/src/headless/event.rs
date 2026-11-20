@@ -211,6 +211,9 @@ pub struct TaskStarted {
     pub workflow: String,
     #[serde(rename = "is_backgrounded", deserialize_with = "nd")]
     pub backgrounded: bool,
+    /// The task of the subagent that started it, if one did.
+    #[serde(rename = "parent_task_id", deserialize_with = "nd")]
+    pub parent_task: String,
 }
 
 /// What changed about a task: status when it ends (completed, failed,

@@ -400,6 +400,7 @@ impl Lines for WireLines {
                         label: t.description,
                         agent: t.subagent_type,
                         background: t.detached,
+                        ..Default::default()
                     }),
                     out,
                 );
@@ -606,6 +607,7 @@ pub(crate) mod tests {
                 label: "dig".into(),
                 agent: "coder".into(),
                 background: true,
+                ..Default::default()
             })
         );
         assert_eq!(
