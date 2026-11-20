@@ -445,6 +445,12 @@ pub(crate) struct State {
     /// A message sent now while the agent asked something waits in the
     /// queue, and goes as soon as that's answered.
     after_ask: bool,
+    /// The agent's own turn ended and no other began: an ask open now is
+    /// one its background subagent made, or one asked outside any turn.
+    /// Blocked on it, the agent still rests between turns, so a message
+    /// starts its next turn rather than waiting behind an ask the agent
+    /// isn't waiting on. False until a turn first ends (Rust-only).
+    between_turns: bool,
     /// How many queued messages, from the front, you sent now: they go
     /// when the turn they stopped ends, whatever holds the queue.
     go_now: usize,
@@ -860,6 +866,7 @@ fn build(reg: Registry, hooks: Hooks, mut cfg: Config) -> (Host, Receiver<Msg>) 
         calls: HashMap::new(),
         mem_answer: None,
         after_ask: false,
+        between_turns: false,
         go_now: 0,
         pics: HashMap::new(),
         commands: saved_commands,
@@ -1376,6 +1383,13 @@ fn info_key(info: &mut Info) -> Vec<u8> {
         info.cache_warm,
     ) = kept;
     key
+}
+
+/// Whether the agent is blocked on an ask inside its own turn. Blocked
+/// between turns, on a background subagent's ask, it takes a message as
+/// its next turn: the ask stays open and is answered on its own.
+fn blocked_mid_turn(st: &State) -> bool {
+    st.info.state == "blocked" && !st.between_turns
 }
 
 /// Whether what the agent says now answers what was waiting: only a turn
@@ -2279,9 +2293,9 @@ impl Host {
             .limit
             .as_ref()
             .is_some_and(|l| l.continue_ && !l.resets_at.is_zero());
-        let busy = st.info.state == "working" || st.info.state == "blocked" || waiting;
+        let busy = st.info.state == "working" || blocked_mid_turn(&st) || waiting;
         let mut now = now;
-        if now && !st.pending.is_empty() {
+        if now && !st.pending.is_empty() && !st.between_turns {
             // Handed to the turn now, it would call off the question or the
             // permission the agent is waiting on: it waits behind it.
             now = false;
@@ -2772,6 +2786,7 @@ impl Host {
             return Err(e);
         }
         if turn {
+            st.between_turns = false;
             st.turn += 1;
             st.info.turn = st.turn;
             st.turn_ev = ev.clone();
@@ -3643,7 +3658,9 @@ impl Host {
         st.info.asking.retain(|a| a.id != id);
         st.info.questions.retain(|q| q.id != id);
         if st.pending.is_empty() && st.info.state == "blocked" {
-            st.info.state = "working".into();
+            // Its own turn is over: it rests again, its subagent working
+            // on in the background.
+            st.info.state = if st.between_turns { "idle" } else { "working" }.into();
             st.info.needs.clear();
         }
     }
@@ -3772,9 +3789,10 @@ impl Host {
             }
             Event::Message(m) => {
                 if m.role == "assistant" && m.parent.is_empty() {
-                    if st.info.state == "idle" {
+                    if st.info.state == "idle" || st.between_turns {
                         st.turn_from = Some(Instant::now()); // it picked up on its own
                     }
+                    st.between_turns = false;
                     // Its own, not a subagent's: it began on what it was
                     // sent, when its turn began after that.
                     if turn_answers(st) {
@@ -4019,6 +4037,7 @@ impl Host {
     /// Settles a turn: its cost, and whether it stalled on a limit or an
     /// error, else rest or the queue.
     fn on_turn_end(&self, st: &mut State, conn: &Arc<dyn Conn>, e: event::TurnEnd) {
+        st.between_turns = true;
         self.quiet_turn(st);
         let f = json!({"turn": st.turn, "cause": st.turn_ev, "reason": e.reason, "err": e.err, "cost": e.cost, "ms": e.duration.as_millis() as i64, "turns": e.turns, "said": clip(&e.text)});
         self.event(st, "turn-end", f);
@@ -4076,6 +4095,14 @@ impl Host {
             // Answered: it writes only if that clears a failure.
             let (f, k) = (self.hooks.health_answered.clone(), self.health_key(st));
             std::thread::spawn(move || f(&k));
+        }
+        if !st.pending.is_empty() && self.ready(st) {
+            // An ask outlived the turn, a background subagent's: the agent
+            // isn't waiting on it, so what was sent meanwhile is its next
+            // turn, the ask still open.
+            self.send_queue(st);
+            self.turn_done(st, &e);
+            return;
         }
         if st.pending.is_empty() {
             st.info.state = "idle".into();

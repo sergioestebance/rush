@@ -1108,3 +1108,153 @@ fn slash_commands_are_saved_and_loaded() {
     };
     assert_eq!(got, list);
 }
+
+// ---- a background subagent's ask outlives its parent's turn ----
+
+/// The approval a background subagent asks for, by id.
+fn subagent_ask(id: &str) -> Event {
+    Event::Approval(Box::new(event::Approval {
+        id: id.into(),
+        call: tool::Call {
+            id: format!("toolu_{id}"),
+            name: "Bash".into(),
+            input: tool::Input {
+                command: "cd a && rm -f ../b/*".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        reason: "Dangerous rm operation".into(),
+        ..Default::default()
+    }))
+}
+
+/// The agent's own turn ending on words of its own.
+fn own_turn_end(h: &Host, conn: &Arc<dyn Conn>) {
+    let mut st = h.lock();
+    h.on_agent_event(
+        &mut st,
+        conn,
+        Event::TurnEnd(event::TurnEnd {
+            reason: "done".into(),
+            text: "launched".into(),
+            turns: 1,
+            ..Default::default()
+        }),
+    );
+}
+
+// A background subagent asks after its parent's turn ended: the parent
+// isn't waiting on it, so your message is its next turn at once, never
+// queued behind the ask, which stays open for you to answer.
+#[test]
+fn a_message_goes_past_a_subagents_ask_after_the_turn() {
+    let _home = Home::new();
+    let h = host(cfg("sq"));
+    let c = Arc::new(Kept::default());
+    let conn: Arc<dyn Conn> = c.clone();
+    with_conn(&h, conn.clone());
+    h.lock().info.state = "working".into();
+    own_turn_end(&h, &conn);
+    {
+        let mut st = h.lock();
+        h.on_agent_event(&mut st, &conn, subagent_ask("p1"));
+        assert_eq!(st.info.state, "blocked");
+    }
+    h.send("what's status?", &[], false).unwrap();
+    let st = h.lock();
+    let got = c.got.lock().unwrap();
+    assert!(
+        got.len() == 1 && got[0].text.contains("what's status?") && st.info.queue.is_empty(),
+        "queued behind the subagent's ask: {:?}",
+        st.info.queue
+    );
+    assert!(
+        st.pending.contains_key("p1") && st.info.state == "blocked" && st.info.asking.len() == 1,
+        "the ask stays open: {} {:?}",
+        st.info.state,
+        st.info.asking
+    );
+}
+
+// The subagent asked while its parent's turn ran: a message sent then
+// waits for that turn, and goes when it ends though the ask is still
+// open. The next message, sent while that turn runs, waits again.
+#[test]
+fn what_waited_goes_when_the_turn_ends_with_a_subagents_ask_open() {
+    let _home = Home::new();
+    let h = host(cfg("sw"));
+    let c = Arc::new(Kept::default());
+    let conn: Arc<dyn Conn> = c.clone();
+    with_conn(&h, conn.clone());
+    {
+        let mut st = h.lock();
+        st.info.state = "working".into();
+        h.on_agent_event(&mut st, &conn, subagent_ask("p1"));
+    }
+    h.send("meanwhile", &[], false).unwrap();
+    assert!(
+        c.got.lock().unwrap().is_empty() && h.lock().info.queue.len() == 1,
+        "mid-turn, it waits for the turn"
+    );
+    own_turn_end(&h, &conn);
+    {
+        let st = h.lock();
+        let got = c.got.lock().unwrap();
+        assert!(
+            got.len() == 1 && got[0].text.contains("meanwhile") && st.info.queue.is_empty(),
+            "the turn's end sends what waited: {:?}",
+            st.info.queue
+        );
+        assert!(st.pending.contains_key("p1") && st.info.state == "blocked");
+    }
+    h.send("and this", &[], false).unwrap();
+    assert!(
+        c.got.lock().unwrap().len() == 1 && h.lock().info.queue.len() == 1,
+        "the turn it started runs: the next waits for it"
+    );
+}
+
+// Answered between its parent's turns, the subagent's ask leaves the
+// parent at rest, never working on a turn it isn't taking.
+#[test]
+fn a_subagents_ask_answered_between_turns_leaves_the_agent_idle() {
+    let _home = Home::new();
+    let h = host(cfg("si"));
+    let c = Arc::new(Kept::default());
+    let conn: Arc<dyn Conn> = c.clone();
+    with_conn(&h, conn.clone());
+    h.lock().info.state = "working".into();
+    own_turn_end(&h, &conn);
+    let mut st = h.lock();
+    h.on_agent_event(&mut st, &conn, subagent_ask("p1"));
+    h.answered(&mut st, "p1");
+    assert!(
+        st.info.state == "idle" && st.info.needs.is_empty() && st.info.asking.is_empty(),
+        "{} ({})",
+        st.info.state,
+        st.info.needs
+    );
+}
+
+// The agent's own ask mid-turn still holds what you send: the turn waits
+// on it, and a message would go to a turn that can't take it.
+#[test]
+fn the_agents_own_ask_mid_turn_still_queues() {
+    let _home = Home::new();
+    let h = host(cfg("so"));
+    let c = Arc::new(Kept::default());
+    let conn: Arc<dyn Conn> = c.clone();
+    with_conn(&h, conn.clone());
+    {
+        let mut st = h.lock();
+        st.info.state = "working".into();
+        st.between_turns = false;
+        h.on_agent_event(&mut st, &conn, subagent_ask("p1"));
+    }
+    h.send("later", &[], false).unwrap();
+    assert!(c.got.lock().unwrap().is_empty() && h.lock().info.queue.len() == 1);
+    let mut st = h.lock();
+    h.answered(&mut st, "p1");
+    assert_eq!(st.info.state, "working", "answered mid-turn, the turn goes on");
+}
