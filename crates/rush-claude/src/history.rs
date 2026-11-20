@@ -688,9 +688,16 @@ mod tests {
             let plain = read_history(&crate::Claude::new(), &s, before).unwrap();
             let timed = read_timed(Path::new(NESTED), before, false).unwrap();
             assert!(!plain.is_empty());
-            assert_eq!(timed.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>(), plain);
+            assert_eq!(
+                timed.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>(),
+                plain
+            );
             assert!(timed.windows(2).all(|w| w[0].0 <= w[1].0));
-            assert!(timed.iter().all(|(t, _)| *t > 0 && (before == 0 || *t < before)));
+            assert!(
+                timed
+                    .iter()
+                    .all(|(t, _)| *t > 0 && (before == 0 || *t < before))
+            );
         }
     }
 }

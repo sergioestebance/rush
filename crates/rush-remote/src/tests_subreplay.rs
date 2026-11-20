@@ -57,7 +57,14 @@ fn text(v: &Value) -> String {
 /// The tail without subagents: what the transcript alone gives.
 fn alone(s: &AgentSession, frames: usize) -> (Vec<Vec<u8>>, Place, bool) {
     let evs = read_history(&Claude::new(), s, Time::now().to_ms()).unwrap();
-    pick_turns(&evs, false, Place::default(), TAIL_TURNS, frames, TAIL_BYTES)
+    pick_turns(
+        &evs,
+        false,
+        Place::default(),
+        TAIL_TURNS,
+        frames,
+        TAIL_BYTES,
+    )
 }
 
 /// A reopened chat's tail carries its subagents' messages, each Parent the
@@ -135,7 +142,11 @@ fn the_caps_drop_subagent_messages_first() {
     let vs = read(&frames);
     let subs: Vec<&Value> = vs.iter().filter(|v| !parent(v).is_empty()).collect();
     assert_eq!((vs.len(), subs.len()), (own + 1, 1));
-    assert!(parent(subs[0]) == OUTER && calls(subs[0], INNER), "{}", subs[0]);
+    assert!(
+        parent(subs[0]) == OUTER && calls(subs[0], INNER),
+        "{}",
+        subs[0]
+    );
 }
 
 /// A full stream carries every one of them with the session's whole

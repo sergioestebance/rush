@@ -1744,6 +1744,7 @@ dependencies = [
  "libc",
  "ring",
  "rush-bundled",
+ "rush-claude",
  "rush-convo",
  "rush-core",
  "rush-events",
