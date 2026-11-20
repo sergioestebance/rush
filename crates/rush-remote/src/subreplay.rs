@@ -33,7 +33,8 @@ pub(crate) fn read(a: &dyn Adapter, s: &AgentSession, before: Ms) -> Option<Repl
         .subagent_history(s, before)
         .ok()
         .filter(|v| !v.is_empty())?;
-    let (times, evs) = r.timed_history(s, before).ok()?.into_iter().unzip();
+    let (times, mut evs): (Vec<_>, Vec<_>) = r.timed_history(s, before).ok()?.into_iter().unzip();
+    crate::yours::mark(&mut evs);
     Some(Replay { times, evs, subs })
 }
 

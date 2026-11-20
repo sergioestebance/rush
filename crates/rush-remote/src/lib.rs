@@ -33,6 +33,7 @@ pub mod sshwire;
 mod subreplay;
 pub mod watch;
 pub mod web;
+mod yours;
 
 pub use config::{Config, Peer, load_config, save_config, token};
 pub use ctx::Ctx;
@@ -47,6 +48,8 @@ mod tests_server;
 mod tests_sshd;
 #[cfg(test)]
 mod tests_subreplay;
+#[cfg(test)]
+mod tests_yours;
 #[cfg(test)]
 pub(crate) mod testutil;
 

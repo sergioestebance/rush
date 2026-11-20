@@ -54,9 +54,11 @@ fn text(v: &Value) -> String {
     v["e"]["Parts"][0]["Text"].as_str().unwrap_or("").into()
 }
 
-/// The tail without subagents: what the transcript alone gives.
+/// The tail without subagents: what the transcript alone gives, your
+/// messages marked yours.
 fn alone(s: &AgentSession, frames: usize) -> (Vec<Vec<u8>>, Place, bool) {
-    let evs = read_history(&Claude::new(), s, Time::now().to_ms()).unwrap();
+    let mut evs = read_history(&Claude::new(), s, Time::now().to_ms()).unwrap();
+    crate::yours::mark(&mut evs);
     pick_turns(
         &evs,
         false,

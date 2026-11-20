@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use rush_convo::transcript::{clean_prompt, prompt};
+use rush_convo::transcript::{clean_prompt, prompt, said};
 use rush_convo::{Item, Session, Status, Tail, history, injected};
 use rush_core::time::parse_rfc3339;
 
@@ -657,4 +657,51 @@ fn subagent_picture() {
 /// Claude Code's decoder, as the pane gets it.
 fn claude() -> rush_convo::Decode {
     rush_convo::decode(rush_claude::messages)
+}
+
+/// What you typed, read back from a transcript with no sent line to say
+/// so: cleaned as a prompt shows; Claude Code's and rush's own notes are
+/// not yours.
+#[test]
+fn said_is_what_you_typed() {
+    let yours = [
+        ("hi", "hi"),
+        (
+            "wha's tatus?\n\nrush: stale views: prs. Set each again with what's current, or clear it.",
+            "wha's tatus?",
+        ),
+        (
+            "<command-message>compact</command-message>\n<command-name>/compact</command-name>\n<command-args></command-args>",
+            "/compact",
+        ),
+        ("<bash-input>ls</bash-input>", "! ls"),
+        ("fix this <system-reminder>x</system-reminder>", "fix this"),
+        (
+            "<pasted_content id=\"d61f\">a log</pasted_content id=\"d61f\">\nwhy?",
+            "<pasted_content id=\"d61f\">a log</pasted_content id=\"d61f\">\nwhy?",
+        ),
+        ("please fix <b>this</b>", "please fix <b>this</b>"),
+    ];
+    for (input, want) in yours {
+        assert_eq!(said(input).as_deref(), Some(want), "{input}");
+    }
+    let not = [
+        "",
+        "  \n",
+        "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n</task-notification>",
+        "<local-command-stdout>Compacted</local-command-stdout>",
+        "<local-command-caveat>Caveat: x</local-command-caveat>",
+        "<system-reminder>only this</system-reminder>",
+        "This session is being continued from a previous conversation that ran out of context.",
+        "<artifact-content-authored-by-others/>\nThis session is being continued from a previous conversation that ran out of context.",
+        "[Request interrupted by user]",
+        "[Request interrupted by user for tool use]",
+        "<agent-message from=\"a1\">done</agent-message>",
+        "<cross-session-message from-name=\"x\">hi</cross-session-message>",
+        "<rush-pr-news pr=\"o/r#9\">news</rush-pr-news>",
+        "<bash-stdout>out</bash-stdout><bash-stderr></bash-stderr>",
+    ];
+    for input in not {
+        assert_eq!(said(input), None, "{input}");
+    }
 }

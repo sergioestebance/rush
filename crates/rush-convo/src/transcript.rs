@@ -918,6 +918,26 @@ pub fn clean_prompt(s: &str) -> String {
     s.trim().to_owned()
 }
 
+/// What you typed, in a user text Claude Code wrote to its transcript:
+/// the text cleaned as a prompt shows (clean_prompt). None when it is
+/// Claude Code's or rush's own: nothing left once cleaned, a compaction's
+/// summary, a stop, or a note `injected` names. A history read back has no
+/// `sent` line to tell it, so this does (Rust-only).
+pub fn said(text: &str) -> Option<String> {
+    let s = clean_prompt(text);
+    if s.is_empty()
+        || compact_summary_text(&s).is_some()
+        || s.starts_with("[Request interrupted by user")
+    {
+        return None;
+    }
+    // A paste is what you pasted, its wrapper Claude Code's way of saying so.
+    if s.starts_with("<pasted_content") || injected(&s).is_none() {
+        return Some(s);
+    }
+    None
+}
+
 /// How rush's line on the agent's stale views starts, after a blank line
 /// at the end of the message that starts its turn (rush_host::viewstale).
 pub const STALE_VIEWS_LEAD: &str = "\n\nrush: stale views: ";

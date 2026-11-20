@@ -220,19 +220,26 @@ fn read_turns(a: &dyn Adapter, s: &AgentSession, before: Time, want: usize) -> (
                 return (Vec::new(), false);
             };
             if !cut || user_turns(&evs) > want {
+                let mut evs = evs;
+                crate::yours::mark(&mut evs);
                 return (evs, cut);
             }
             // Go's int64 would wrap here; no transcript gets that far.
             match most.checked_mul(4) {
                 Some(m) => most = m,
-                None => return (evs, cut),
+                None => {
+                    let mut evs = evs;
+                    crate::yours::mark(&mut evs);
+                    return (evs, cut);
+                }
             }
         }
     }
     if let Some(hr) = a.history_reader()
-        && let Ok(evs) = read_history(hr, s, before.to_ms())
+        && let Ok(mut evs) = read_history(hr, s, before.to_ms())
     {
         // Reads the whole transcript to keep its end.
+        crate::yours::mark(&mut evs);
         return (evs, false);
     }
     (Vec::new(), false)
@@ -240,8 +247,8 @@ fn read_turns(a: &dyn Adapter, s: &AgentSession, before: Time, want: usize) -> (
 
 /// A message that starts a turn: one you said, not one the agent put in as
 /// yours. Claude's transcript reader marks every user text injected (the
-/// host tells what you sent, live), so there it's what Claude Code's own
-/// wrappers aren't.
+/// host tells what you sent, live), so there it's what yours says is yours:
+/// a turn counted is a message a client shows.
 pub(crate) fn is_user_turn(ev: &Event) -> bool {
     let Event::Message(m) = ev else {
         return false;
@@ -249,11 +256,12 @@ pub(crate) fn is_user_turn(ev: &Event) -> bool {
     if m.role != "user" || !m.parent.is_empty() {
         return false;
     }
-    m.parts.iter().any(|p| {
-        p.kind == event::PartKind::Text
-            && !p.text.trim().is_empty()
-            && (!m.injected || rush_convo::transcript::injected(&p.text).is_none())
-    })
+    if m.injected {
+        return crate::yours::yours(m).is_some();
+    }
+    m.parts
+        .iter()
+        .any(|p| p.kind == event::PartKind::Text && !p.text.trim().is_empty())
 }
 
 fn user_turns(evs: &[Event]) -> usize {

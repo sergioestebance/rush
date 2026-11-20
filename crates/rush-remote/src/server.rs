@@ -1725,12 +1725,13 @@ pub fn send_history(
     if evs.is_empty() {
         return;
     }
-    let evs = if evs.len() > most {
+    let mut evs = if evs.len() > most {
         cut = true;
         evs[evs.len() - most..].to_vec()
     } else {
         evs
     };
+    crate::yours::mark(&mut evs);
     if cut {
         emit(br#"{"t":"cut"}"#.to_vec());
     }

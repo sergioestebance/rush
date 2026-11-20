@@ -42,6 +42,12 @@ struct Line<'a> {
     /// What a queue-operation queued.
     #[serde(borrow)]
     content: Option<&'a RawValue>,
+    /// Which line this is: Claude Code may write one twice.
+    #[serde(borrow)]
+    uuid: Str<'a>,
+    /// An attachment line's: a prompt sent while the agent was busy is one.
+    #[serde(borrow)]
+    attachment: Option<&'a RawValue>,
 }
 
 /// The background tasks a read has told ended already, by id, call and
@@ -119,13 +125,44 @@ fn take_line(dec: &mut dyn MessageDecoder, l: &Line, told: &mut Told) -> Took {
             Took::Events(done)
         };
     }
+    if &*l.typ == "attachment" {
+        return match queued_prompt(l) {
+            Some(m) => Took::Events(dec.message("user", &m, None)),
+            None => Took::Skip,
+        };
+    }
     if &*l.typ != "user" && &*l.typ != "assistant" {
         return Took::Skip;
     }
     let Some(m) = l.message else {
         return Took::Skip;
     };
+    // A line written again (its uuid read already) is the same message.
+    if !l.uuid.is_empty() && !told.insert(format!("uuid {}", &*l.uuid)) {
+        return Took::Skip;
+    }
     Took::Events(dec.message(&l.typ, m, l.tool_use_result))
+}
+
+/// The message of a prompt sent while the agent was busy: Claude Code
+/// writes no user line for it, only a queued_command attachment when the
+/// agent takes it (a task notice queued the same way is told by notice).
+fn queued_prompt(l: &Line) -> Option<Box<RawValue>> {
+    #[derive(Deserialize)]
+    struct Queued<'a> {
+        #[serde(rename = "type", borrow)]
+        typ: Str<'a>,
+        #[serde(rename = "commandMode", borrow, default)]
+        mode: Str<'a>,
+        #[serde(borrow)]
+        prompt: Option<&'a RawValue>,
+    }
+    let q: Queued = serde_json::from_str(l.attachment?.get()).ok()?;
+    if &*q.typ != "queued_command" || &*q.mode != "prompt" {
+        return None;
+    }
+    let m = format!(r#"{{"role":"user","content":{}}}"#, q.prompt?.get());
+    RawValue::from_string(m).ok()
 }
 
 /// SubagentHistoryReader::timed_history of the transcript at path: what
@@ -428,6 +465,65 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn read_lines(name: &str, lines: &[&str]) -> Vec<Event> {
+        let d = TempDir::new(name);
+        let p = d.0.join("t.jsonl");
+        std::fs::write(&p, lines.join("\n") + "\n").unwrap();
+        let s = Session {
+            transcript: p.to_string_lossy().into_owned(),
+            ..Session::default()
+        };
+        read_history(&crate::Claude::new(), &s, 0).unwrap()
+    }
+
+    /// A prompt sent while the agent was busy has no user line: Claude
+    /// Code writes it as a queued_command attachment, a prompt's text and
+    /// image blocks or its string. A queued task notice is not a prompt.
+    #[test]
+    fn a_prompt_sent_while_busy_is_read_where_it_was_taken() {
+        let evs = read_lines(
+            "queued",
+            &[
+                &user("first", "2026-11-20T10:00:00Z"),
+                r#"{"type":"attachment","timestamp":"2026-11-20T10:00:01Z","uuid":"q1","attachment":{"type":"queued_command","prompt":"u fix it?","commandMode":"prompt","origin":{"kind":"human"}}}"#,
+                r#"{"type":"attachment","timestamp":"2026-11-20T10:00:02Z","uuid":"q2","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"[thread neat-mole]\nand this"}],"commandMode":"prompt"}}"#,
+                r#"{"type":"attachment","timestamp":"2026-11-20T10:00:03Z","uuid":"q3","attachment":{"type":"queued_command","prompt":"<task-notification><task-id>a1</task-id><status>completed</status></task-notification>","commandMode":"task-notification"}}"#,
+                r#"{"type":"attachment","timestamp":"2026-11-20T10:00:04Z","uuid":"q4","attachment":{"type":"hook_success","content":"ok"}}"#,
+            ],
+        );
+        assert_eq!(
+            texts(&evs),
+            ["first", "u fix it?", "[thread neat-mole]\nand this"]
+        );
+        for e in &evs {
+            let Event::Message(m) = e else {
+                panic!("not a message: {e:?}")
+            };
+            assert_eq!(m.role, "user");
+        }
+    }
+
+    /// Claude Code may write a prompt's line twice, the same uuid both
+    /// times, far apart: it is read once.
+    #[test]
+    fn a_line_written_twice_is_read_once() {
+        let twice = r#"{"type":"user","timestamp":"2026-11-20T10:00:00Z","uuid":"e1bb0e0f","message":{"role":"user","content":"did it stay out?"}}"#;
+        let evs = read_lines(
+            "twice",
+            &[
+                twice,
+                r#"{"type":"assistant","timestamp":"2026-11-20T10:00:01Z","uuid":"a1","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"yes"}]}}"#,
+                twice,
+                r#"{"type":"user","timestamp":"2026-11-20T10:00:02Z","message":{"role":"user","content":"no uuid"}}"#,
+                r#"{"type":"user","timestamp":"2026-11-20T10:00:03Z","message":{"role":"user","content":"no uuid"}}"#,
+            ],
+        );
+        assert_eq!(
+            texts(&evs),
+            ["did it stay out?", "yes", "no uuid", "no uuid"]
+        );
     }
 
     #[test]
