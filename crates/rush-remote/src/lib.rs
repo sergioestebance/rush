@@ -30,6 +30,7 @@ pub mod service;
 pub mod sshd;
 pub mod sshkey;
 pub mod sshwire;
+mod subreplay;
 pub mod watch;
 pub mod web;
 
@@ -44,6 +45,8 @@ mod tests_resume;
 mod tests_server;
 #[cfg(test)]
 mod tests_sshd;
+#[cfg(test)]
+mod tests_subreplay;
 #[cfg(test)]
 pub(crate) mod testutil;
 

@@ -771,6 +771,14 @@ struct Meta {
     description: String,
 }
 
+/// The call that started the run whose meta file is at p: its toolUseId.
+/// None when it can't be read or names none.
+pub(crate) fn launch_call(p: &Path) -> Option<String> {
+    let b = std::fs::read(p).ok()?;
+    let m = serde_json::from_slice::<Meta>(&b).ok()?;
+    (!m.tool_use.is_empty()).then_some(m.tool_use)
+}
+
 /// The agent-*.meta.json files in dir, by name.
 pub(crate) fn meta_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(rd) = std::fs::read_dir(dir) else {

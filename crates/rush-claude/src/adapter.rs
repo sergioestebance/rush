@@ -32,7 +32,8 @@ use rush_core::adapter::{
     self, Codenamer, ContextWindower, CwdReader, Describer, Discoverer, FastPricer, Feature,
     Features, HistoryFollower, HistoryReader, Homer, JobKeeper, Keyed, Kind, Level, LoginHinter,
     Made, Native, Previewer, Pricer, Profile, Programmer, ProjectFolderer, RunFollower, Session,
-    Speaker, SpendReader, SpendScanner, SpendTarget, SubagentStats, Support, TailReader,
+    Speaker, SpendReader, SpendScanner, SpendTarget, SubagentHistoryReader, SubagentStats, Support,
+    TailReader,
     TranscriptLocator, Transcripts, Worded,
 };
 use rush_core::agent::{Preview, Spend, TokenUsage};
@@ -269,6 +270,7 @@ impl adapter::Adapter for Claude {
         history_reader: HistoryReader,
         history_follower: HistoryFollower,
         tail_reader: TailReader,
+        subagent_history_reader: SubagentHistoryReader,
         programmer: Programmer,
         project_folderer: ProjectFolderer,
         login_hinter: LoginHinter,
@@ -668,6 +670,20 @@ impl TailReader for Claude {
         most: i64,
     ) -> adapter::Result<(Vec<rush_core::event::Event>, bool)> {
         history::tail(s, most)
+    }
+}
+
+impl SubagentHistoryReader for Claude {
+    /// What its subagents' own transcripts, beside the session's, say.
+    fn subagent_history(
+        &self,
+        s: &Session,
+        before: Ms,
+    ) -> adapter::Result<Vec<adapter::Timed>> {
+        history::subagents(s, before)
+    }
+    fn timed_history(&self, s: &Session, before: Ms) -> adapter::Result<Vec<adapter::Timed>> {
+        history::read_timed(Path::new(&s.transcript), before, false)
     }
 }
 

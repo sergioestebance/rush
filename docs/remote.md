@@ -42,6 +42,21 @@ server in front of those hosts. This is the simpler plan that replaced
     back: the 10 turns before it, oldest first, then a `cut` with the next
     cursor when there are more, and the response ends. A bad cursor is a
     400.
+  - Replayed history (the tail, a history page, `?full=1`) carries what a
+    session's subagents said, as the live stream does: each `message` of a
+    subagent's own transcript (Claude Code's `subagents/agent-<id>.jsonl`)
+    with `Parent` the call that started its run (its meta's `toolUseId`),
+    so a subagent's own Agent call, which starts a nested one, comes with
+    its `Parent`. They go among the session's frames by when each was
+    written, after the session's frames written at the same time. A page
+    holds those written in its span, from its first frame (the start, on
+    the oldest) to the first the client has (the end, on the newest), so
+    none is sent twice; the cursor counts only the session's own. When the
+    frame or byte caps leave no room, subagent messages are dropped first,
+    those that start a run kept longest. A workflow's agents (a folder
+    down) aren't carried. A session without subagents replays as before.
+    `task_started` says the task that started it in `Parent` when another
+    did (left out when none).
   - `POST /api/sessions/{id}/op` sends one host op from an allowlist: send,
     allow/deny, interrupt, stop, model/effort/mode, stop_task, background,
     queue ops, away/back, limit (carry on at the reset or not), context,

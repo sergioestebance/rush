@@ -1652,7 +1652,8 @@ pub const FULL_MOST: usize = 50_000;
 
 /// Sends what a session's transcript holds from before before (all of it
 /// when zero): its last HISTORY_MOST events, or with full the whole
-/// transcript up to FULL_MOST. A "cut" says there's more before.
+/// transcript up to FULL_MOST, and what its subagents said since the first
+/// of them (subreplay). A "cut" says there's more before.
 pub fn send_history(
     reg: &Registry,
     info: &Info,
@@ -1665,6 +1666,20 @@ pub fn send_history(
     };
     const TAIL_BYTES: i64 = 4 << 20;
     let most = if full { FULL_MOST } else { HISTORY_MOST };
+    if let Some(r) = crate::subreplay::read(&*a, &s, before.to_ms()) {
+        // With what its subagents said, among its newest events.
+        let (frames, cut) = crate::subreplay::newest(&r, most);
+        if frames.is_empty() {
+            return;
+        }
+        if cut {
+            emit(br#"{"t":"cut"}"#.to_vec());
+        }
+        for b in frames {
+            emit(b);
+        }
+        return;
+    }
     let (evs, mut cut): (Vec<Event>, bool) = if let Some(tb) = a.history_tail_before_reader()
         && !before.is_zero()
         && !full

@@ -4,13 +4,15 @@
 //! leaves them out. Port of internal/adapters/claude/history.go:31-71
 //! (History), sliced; following it as it grows is this port's own
 //! (Go's Claude adapter has no FollowHistory: its pane tails the
-//! transcript itself).
+//! transcript itself), as is reading it with each line's time and its
+//! subagents' transcripts beside it, for a replay to carry what they said
+//! (subagent_history).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use rush_core::adapter::{self, Follow, MessageDecoder, Session, Slice, WaitOn};
+use rush_core::adapter::{self, Follow, MessageDecoder, Session, Slice, Timed, WaitOn};
 use rush_core::event::Event;
 use rush_core::time::Ms;
 use serde::Deserialize;
@@ -56,11 +58,7 @@ enum Took {
 }
 
 fn take(dec: &mut dyn MessageDecoder, b: &[u8], before: Ms, told: &mut Told) -> Took {
-    let b = b.strip_suffix(b"\n").unwrap_or(b);
-    if b.is_empty() {
-        return Took::Skip;
-    }
-    let Ok(l) = serde_json::from_slice::<Line>(b) else {
+    let Some(l) = parse(b) else {
         return Took::Skip;
     };
     if l.is_meta || l.is_sidechain {
@@ -72,7 +70,44 @@ fn take(dec: &mut dyn MessageDecoder, b: &[u8], before: Ms, told: &mut Told) -> 
             return Took::Past;
         }
     }
-    if let Some(text) = notice(&l) {
+    take_line(dec, &l, told)
+}
+
+/// take, and when the line was written (0 when it doesn't say). side
+/// reads a subagent's own transcript, every line of which is a sidechain.
+fn take_at(
+    dec: &mut dyn MessageDecoder,
+    b: &[u8],
+    before: Ms,
+    told: &mut Told,
+    side: bool,
+) -> (Ms, Took) {
+    let Some(l) = parse(b) else {
+        return (0, Took::Skip);
+    };
+    let at = ms(&l.timestamp);
+    if l.is_meta || (l.is_sidechain && !side) {
+        return (at, Took::Skip);
+    }
+    if before != 0 && at != 0 && at >= before {
+        return (at, Took::Past);
+    }
+    (at, take_line(dec, &l, told))
+}
+
+/// A transcript line, its newline left off; None for a blank or broken
+/// one.
+fn parse(b: &[u8]) -> Option<Line<'_>> {
+    let b = b.strip_suffix(b"\n").unwrap_or(b);
+    if b.is_empty() {
+        return None;
+    }
+    serde_json::from_slice::<Line>(b).ok()
+}
+
+/// What a line read in, before the time asked for, comes to.
+fn take_line(dec: &mut dyn MessageDecoder, l: &Line, told: &mut Told) -> Took {
+    if let Some(text) = notice(l) {
         let done: Vec<Event> = ended(&text)
             .into_iter()
             .filter(|d| told.insert(format!("{},{},{}", d.id, d.call_id, d.status)))
@@ -91,6 +126,63 @@ fn take(dec: &mut dyn MessageDecoder, b: &[u8], before: Ms, told: &mut Told) -> 
         return Took::Skip;
     };
     Took::Events(dec.message(&l.typ, m, l.tool_use_result))
+}
+
+/// SubagentHistoryReader::timed_history of the transcript at path: what
+/// read gives of it before `before`, each event with when its line was
+/// written, a line that doesn't say (or says earlier) taking the time of
+/// the one before. side reads a subagent's transcript.
+pub(crate) fn read_timed(path: &Path, before: Ms, side: bool) -> adapter::Result<Vec<Timed>> {
+    let mut r = BufReader::with_capacity(64 << 10, File::open(path)?);
+    let mut dec = crate::messages();
+    let mut told = Told::new();
+    let (mut out, mut line, mut last) = (Vec::new(), Vec::new(), 0);
+    loop {
+        line.clear();
+        if r.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        let (at, took) = take_at(dec.as_mut(), &line, before, &mut told, side);
+        last = last.max(at);
+        match took {
+            Took::Events(evs) => out.extend(evs.into_iter().map(|e| (last, e))),
+            Took::Skip => {}
+            Took::Past => break,
+        }
+    }
+    Ok(out)
+}
+
+/// SubagentHistoryReader::subagent_history: the messages of the runs
+/// beside s's transcript (subagents/agent-<id>.jsonl, each named by its
+/// meta's toolUseId) written before `before`, by when, each Parent the
+/// call that started its run. A workflow's agents, a folder down, are
+/// left out: no call of the session's started them.
+pub(crate) fn subagents(s: &Session, before: Ms) -> adapter::Result<Vec<Timed>> {
+    if s.transcript.is_empty() {
+        return Err(Box::new(NoTranscript));
+    }
+    let dir = crate::transcript::subagents_dir(Path::new(&s.transcript));
+    let mut out = Vec::new();
+    for meta in crate::subruns::meta_files(&dir) {
+        let Some(call) = crate::subruns::launch_call(&meta) else {
+            continue;
+        };
+        let path = dir.join(format!("agent-{}.jsonl", crate::subruns::meta_id(&meta)));
+        let Ok(evs) = read_timed(&path, before, true) else {
+            continue;
+        };
+        out.extend(evs.into_iter().filter_map(|(at, e)| match e {
+            Event::Message(mut m) => {
+                m.parent = call.clone();
+                Some((at, Event::Message(m)))
+            }
+            _ => None,
+        }));
+    }
+    // Stable: a run's own lines keep their order.
+    out.sort_by_key(|(at, _)| *at);
+    Ok(out)
 }
 
 /// A line's word that background tasks ended: Claude Code queues it as it
@@ -519,5 +611,86 @@ mod tests {
             ..Session::default()
         };
         rush_core::adapter::conform::check_tail(&crate::Claude::new(), &s, b.len() as i64 / 4);
+    }
+
+    /// A session (scrubbed from a real one) whose background agent, outer,
+    /// started one of its own, inner: each transcript beside its parent's.
+    const NESTED: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/testdata/nested/83285775-c7df-411b-a3d9-f931d0a3adff.jsonl"
+    );
+    const OUTER: &str = "toolu_01Y53coUkU79eVYmqFCQby5g";
+    const INNER: &str = "toolu_0193Yh1rE4bhRGPd45DYp68h";
+
+    fn calls(e: &Event) -> Vec<(String, String)> {
+        let Event::Message(m) = e else {
+            return Vec::new();
+        };
+        m.parts
+            .iter()
+            .filter_map(|p| p.call.as_ref())
+            .map(|c| (c.name.clone(), c.id.clone()))
+            .collect()
+    }
+
+    /// Each subagent's messages, oldest first, name the call that started
+    /// its run: outer's own Agent call (inner's start) is outer's, inner's
+    /// Bash calls inner's.
+    #[test]
+    fn subagent_messages_name_the_call_that_started_their_run() {
+        let s = Session {
+            transcript: NESTED.into(),
+            ..Session::default()
+        };
+        let subs = subagents(&s, 0).unwrap();
+        assert!(subs.windows(2).all(|w| w[0].0 <= w[1].0), "by time");
+        let parent = |e: &Event| match e {
+            Event::Message(m) => m.parent.clone(),
+            _ => panic!("only messages: {e:?}"),
+        };
+        let of = |call: &str| subs.iter().filter(|(_, e)| parent(e) == call).count();
+        assert_eq!((of(OUTER), of(INNER), subs.len()), (4, 7, 11));
+        let launch = subs
+            .iter()
+            .find(|(_, e)| calls(e).iter().any(|(_, id)| id == INNER))
+            .expect("outer's Agent call");
+        assert_eq!(parent(&launch.1), OUTER);
+        assert_eq!(calls(&launch.1), [("Agent".to_string(), INNER.to_string())]);
+        assert!(
+            subs.iter()
+                .filter(|(_, e)| parent(e) == INNER)
+                .any(|(_, e)| calls(e).iter().any(|(n, _)| n == "Bash"))
+        );
+        // Before inner began, only outer had said anything.
+        let began = subs.iter().find(|(_, e)| parent(e) == INNER).unwrap().0;
+        let early = subagents(&s, began).unwrap();
+        assert!(!early.is_empty() && early.iter().all(|(_, e)| parent(e) == OUTER));
+        // A session with no folder beside it has none.
+        let d = TempDir::new("claude-nosubs");
+        let p = d.0.join("t.jsonl");
+        std::fs::write(&p, user("hi", "2026-09-29T10:00:00Z")).unwrap();
+        let alone = Session {
+            transcript: p.to_string_lossy().into_owned(),
+            ..Session::default()
+        };
+        assert!(subagents(&alone, 0).unwrap().is_empty());
+    }
+
+    /// The timed read is the history read, each event with a time that
+    /// never goes back, and it stops at the same time.
+    #[test]
+    fn timed_history_is_the_history_with_times() {
+        let s = Session {
+            transcript: NESTED.into(),
+            ..Session::default()
+        };
+        for before in [0, rush_core::time::parse_rfc3339("2026-11-20T14:18:00Z")] {
+            let plain = read_history(&crate::Claude::new(), &s, before).unwrap();
+            let timed = read_timed(Path::new(NESTED), before, false).unwrap();
+            assert!(!plain.is_empty());
+            assert_eq!(timed.iter().map(|(_, e)| e.clone()).collect::<Vec<_>>(), plain);
+            assert!(timed.windows(2).all(|w| w[0].0 <= w[1].0));
+            assert!(timed.iter().all(|(t, _)| *t > 0 && (before == 0 || *t < before)));
+        }
     }
 }

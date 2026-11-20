@@ -114,6 +114,24 @@ pub fn read_history(r: &dyn HistoryReader, s: &Session, before: Ms) -> Result<Ve
     Ok(out)
 }
 
+/// An event of a history read, and when it was written.
+pub type Timed = (Ms, Event);
+
+/// Reads what a session's subagents said, for a replay to carry beside the
+/// session's own history, and that history with when each event was
+/// written, to place them in it by time. The fork's own: Go's replay
+/// carries the session's transcript alone.
+pub trait SubagentHistoryReader {
+    /// The messages of s's subagents written before `before` (0: all of
+    /// them), oldest first, each with its Parent the call that started its
+    /// run, as the live stream tags them. Empty for a session with none.
+    fn subagent_history(&self, s: &Session, before: Ms) -> Result<Vec<Timed>>;
+    /// The events HistoryReader reads of s before `before`, in its order,
+    /// each with when its line was written: never earlier than the one
+    /// before it, so a time splits them in two.
+    fn timed_history(&self, s: &Session, before: Ms) -> Result<Vec<Timed>>;
+}
+
 /// Reads a session's history as it grows.
 pub trait HistoryFollower {
     /// Starts following s's history from its start.

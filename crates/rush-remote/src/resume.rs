@@ -20,6 +20,7 @@ use serde::Serialize;
 
 use crate::http::{Request, Response};
 use crate::server::{agent_session, fail, sse, valid_id};
+use crate::subreplay;
 
 /// The tail: the newest TAIL_TURNS turns you started, within TAIL_FRAMES
 /// frames and TAIL_BYTES bytes.
@@ -188,7 +189,8 @@ fn file_tail(
     }
 }
 
-/// file_tail of s, a session of a.
+/// file_tail of s, a session of a, with what its subagents said in the
+/// span of the turns it sends when it has any (subreplay).
 pub(crate) fn session_tail(
     a: &dyn Adapter,
     s: &AgentSession,
@@ -198,6 +200,9 @@ pub(crate) fn session_tail(
     frames: usize,
     size: usize,
 ) -> (Vec<Vec<u8>>, Place, bool) {
+    if let Some(r) = subreplay::read(a, s, before.to_ms()) {
+        return subreplay::tail(&r, at, turns, frames, size);
+    }
     let (evs, cut) = read_turns(a, s, before, at.skip + turns);
     pick_turns(&evs, cut, at, turns, frames, size)
 }
@@ -269,9 +274,42 @@ pub(crate) fn pick_turns(
     frames: usize,
     size: usize,
 ) -> (Vec<Vec<u8>>, Place, bool) {
+    let p = pick(evs, cut, at, turns, frames, size);
+    (p.frames, p.next, p.more)
+}
+
+/// What pick_turns chose, and where it lies in evs: the page is
+/// evs[start..end], end the first event the client has (evs.len() when
+/// none), src the event each frame is.
+pub(crate) struct Picked {
+    pub frames: Vec<Vec<u8>>,
+    pub src: Vec<usize>,
+    pub start: usize,
+    pub end: usize,
+    pub next: Place,
+    pub more: bool,
+}
+
+/// pick_turns, saying where its page lies.
+pub(crate) fn pick(
+    evs: &[Event],
+    cut: bool,
+    at: Place,
+    turns: usize,
+    frames: usize,
+    size: usize,
+) -> Picked {
     let starts: Vec<usize> = (0..evs.len()).filter(|&i| is_user_turn(&evs[i])).collect();
+    let none = |next: Place, more: bool| Picked {
+        frames: Vec::new(),
+        src: Vec::new(),
+        start: evs.len(),
+        end: evs.len(),
+        next,
+        more,
+    };
     if at.skip > starts.len() {
-        return (Vec::new(), at, cut);
+        return none(at, cut);
     }
     let whole = |n: usize| Place {
         skip: at.skip + n,
@@ -283,18 +321,28 @@ pub(crate) fn pick_turns(
         evs.len()
     };
     end = end.saturating_sub(at.part);
-    let (mut out, mut bytes, mut n): (Vec<Vec<u8>>, usize, usize) = (Vec::new(), 0, 0);
+    let page_end = end;
+    let done = |out: Vec<Vec<u8>>, src: Vec<usize>, start: usize, next: Place, more: bool| Picked {
+        frames: out,
+        src,
+        start,
+        end: page_end,
+        next,
+        more,
+    };
+    let (mut out, mut out_src, mut bytes, mut n): (Vec<Vec<u8>>, Vec<usize>, usize, usize) =
+        (Vec::new(), Vec::new(), 0, 0);
     // Turn k is evs[starts[k]..end]; k -1 is what comes before the first,
     // part of a turn whose start wasn't read when cut.
     let mut k = starts.len() as isize - 1 - at.skip as isize;
     while k >= -1 {
         if n == turns {
-            return (out, whole(n), k >= 0 || cut || end > 0);
+            return done(out, out_src, end, whole(n), k >= 0 || cut || end > 0);
         }
         let lo = if k >= 0 {
             starts[k as usize].min(end)
         } else if cut {
-            return (out, whole(n), true);
+            return done(out, out_src, end, whole(n), true);
         } else {
             0
         };
@@ -308,7 +356,7 @@ pub(crate) fn pick_turns(
         }
         if out.len() + seg.len() > frames || bytes + sb > size {
             let Some(mut i) = seg.len().checked_sub(1).filter(|_| out.is_empty()) else {
-                return (out, whole(n), true);
+                return done(out, out_src, end, whole(n), true);
             };
             // One turn bigger than the tail: its newest part.
             sb = seg[i].len();
@@ -321,10 +369,13 @@ pub(crate) fn pick_turns(
                 skip: at.skip + n,
                 part: had + end - src[i],
             };
-            return (seg.split_off(i), next, true);
+            let start = src[i];
+            return done(seg.split_off(i), src.split_off(i), start, next, true);
         }
         seg.append(&mut out);
         out = seg;
+        src.append(&mut out_src);
+        out_src = src;
         bytes += sb;
         end = lo;
         if k >= 0 {
@@ -332,5 +383,5 @@ pub(crate) fn pick_turns(
         }
         k -= 1;
     }
-    (out, whole(n), false)
+    done(out, out_src, end, whole(n), false)
 }

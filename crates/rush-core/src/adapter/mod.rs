@@ -254,6 +254,8 @@ pub trait Adapter: Send + Sync {
         history_follower: HistoryFollower;
         tail_reader: TailReader;
         history_tail_before_reader: HistoryTailBeforeReader;
+        /// Reads its subagents' messages, for a replay.
+        subagent_history_reader: SubagentHistoryReader;
         quota_source: QuotaSource;
         reset_spender: ResetSpender;
         plan_reader: PlanReader;

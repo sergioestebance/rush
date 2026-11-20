@@ -25,6 +25,8 @@ ring = "0.17"
 
 [dev-dependencies]
 rush-testenv = { path = "../rush-testenv" }
+# Its transcripts, for the replay of a session's subagents.
+rush-claude.workspace = true
 tempfile.workspace = true
 
 [[test]]
