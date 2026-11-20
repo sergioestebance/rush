@@ -1256,5 +1256,8 @@ fn the_agents_own_ask_mid_turn_still_queues() {
     assert!(c.got.lock().unwrap().is_empty() && h.lock().info.queue.len() == 1);
     let mut st = h.lock();
     h.answered(&mut st, "p1");
-    assert_eq!(st.info.state, "working", "answered mid-turn, the turn goes on");
+    assert_eq!(
+        st.info.state, "working",
+        "answered mid-turn, the turn goes on"
+    );
 }
