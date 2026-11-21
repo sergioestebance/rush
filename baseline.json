@@ -1,6 +1,6 @@
 {
  "commit": "f2909d5a597196a753c536702c2db2172a88e3b6",
- "at": "2026-11-20T17:01:15Z",
+ "at": "2026-11-21T13:12:51Z",
  "metrics": {
   "binary: rush, release": {
    "kind": "binary",
@@ -813,8 +813,5 @@
    "commit": "e9ffdc4fba6ecfe52f9a4625b731f23e2065e203"
   }
  },
- "flagged": [
-  "ui: footprint",
-  "ui: threads"
- ]
+ "flagged": []
 }
